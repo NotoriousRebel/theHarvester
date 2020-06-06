@@ -5,12 +5,14 @@ import yaml
 import asyncio
 import aiohttp
 import random
+import ssl
+import certifi
 
 
 class Core:
     @staticmethod
     def version() -> str:
-        return '3.2.0dev0'
+        return '3.2.0dev2'
 
     @staticmethod
     def bing_key() -> str:
@@ -103,11 +105,11 @@ class Core:
     @staticmethod
     def proxy_list() -> List:
         try:
-            with open('/etc/theHarvester/proxies.yaml', 'r') as api_keys:
-                keys = yaml.safe_load(api_keys)
+            with open('/etc/theHarvester/proxies.yaml', 'r') as proxy_file:
+                keys = yaml.safe_load(proxy_file)
         except FileNotFoundError:
-            with open('proxies.yaml', 'r') as api_keys:
-                keys = yaml.safe_load(api_keys)
+            with open('proxies.yaml', 'r') as proxy_file:
+                keys = yaml.safe_load(proxy_file)
                 http_list = [f'http://{proxy}' for proxy in keys['http']] if keys['http'] is not None else []
                 return http_list
         http_list = [f'http://{proxy}' for proxy in keys['http']] if keys['http'] is not None else []
@@ -151,13 +153,16 @@ class Core:
                             'netcraft',
                             'otx',
                             'pentesttools',
+                            'rapiddns',
                             'securityTrails',
                             'suip',
+                            'sublist3r',
                             'spyse',
                             'threatcrowd',
+                            'threatminer',
                             'trello',
                             'twitter',
-                            'vhost',
+                            'urlscan',
                             'virustotal',
                             'yahoo',
                             }
@@ -429,11 +434,12 @@ class AsyncFetcher:
                         return await resp.text() if json is False else await resp.json()
             else:
                 async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                    async with session.post(url, data=data, params=params) as resp:
+                    sslcontext = ssl.create_default_context(cafile=certifi.where())
+                    async with session.post(url, data=data, ssl=sslcontext, params=params) as resp:
                         await asyncio.sleep(3)
                         return await resp.text() if json is False else await resp.json()
         except Exception as e:
-            print('An exception has occurred: ', e)
+            print(f'An exception has occurred: {e}')
             return ''
 
     @staticmethod
@@ -445,24 +451,28 @@ class AsyncFetcher:
             # TODO determine if method for post requests is necessary
             if proxy != "":
                 if params != "":
-                    async with session.get(url, params=params, proxy=proxy) as response:
+                    sslcontext = ssl.create_default_context(cafile=certifi.where())
+                    async with session.get(url, ssl=sslcontext, params=params, proxy=proxy) as response:
                         return await response.text() if json is False else await response.json()
                 else:
-                    async with session.get(url) as response:
+                    sslcontext = ssl.create_default_context(cafile=certifi.where())
+                    async with session.get(url, ssl=sslcontext, proxy=proxy) as response:
                         await asyncio.sleep(2)
                         return await response.text() if json is False else await response.json()
 
             if params != '':
-                async with session.get(url, params=params) as response:
+                sslcontext = ssl.create_default_context(cafile=certifi.where())
+                async with session.get(url, ssl=sslcontext, params=params) as response:
                     await asyncio.sleep(2)
                     return await response.text() if json is False else await response.json()
 
             else:
-                async with session.get(url) as response:
+                sslcontext = ssl.create_default_context(cafile=certifi.where())
+                async with session.get(url, ssl=sslcontext) as response:
                     await asyncio.sleep(2)
                     return await response.text() if json is False else await response.json()
         except Exception as e:
-            print('An exception has occurred: ', e)
+            print(f'An exception has occurred: {e}')
             return ''
 
     @staticmethod
@@ -487,8 +497,8 @@ class AsyncFetcher:
 
     @classmethod
     async def fetch_all(cls, urls, headers='', params='', json=False, takeover=False, proxy=False) -> list:
-        # By default timeout is 5 minutes, 30 seconds should suffice
-        timeout = aiohttp.ClientTimeout(total=30)
+        # By default timeout is 5 minutes, 60 seconds should suffice
+        timeout = aiohttp.ClientTimeout(total=60)
         if len(headers) == 0:
             headers = {'User-Agent': Core.get_user_agent()}
         if takeover:

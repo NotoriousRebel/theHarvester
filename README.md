@@ -5,7 +5,7 @@
 
 What is this?
 -------------
-theHarvester is a very simple to use, yet powerful and effective tool designed to be used in the early statges of a<br>
+theHarvester is a very simple to use, yet powerful and effective tool designed to be used in the early stages of a<br>
 penetration test or red team engagement. Use it for open source intelligence (OSINT) gathering to help determine a<br>
 company's external threat landscape on the internet. The tool gathers emails, names, subdomains, IPs and URLs using<br>
 multiple public data sources that include:
@@ -18,23 +18,25 @@ Passive:
 
 * bingapi: Microsoft search engine, through the API (Requires an API key, see below.)
 
-* Bufferoverun: Uses data from Rapid7's Project Sonar - www.rapid7.com/research/project-sonar/
+* bufferoverun: Uses data from Rapid7's Project Sonar - www.rapid7.com/research/project-sonar/
 
-* CertSpotter: Cert Spotter monitors Certificate Transparency logs - https://sslmate.com/certspotter/
+* certspotter: Cert Spotter monitors Certificate Transparency logs - https://sslmate.com/certspotter/
 
-* crtsh: Comodo Certificate search - https://crt.sh/
+* crtsh: Comodo Certificate search - https://crt.sh
 
-* dnsdumpster: DNSdumpster search engine - https://dnsdumpster.com/
+* dnsdumpster: DNSdumpster search engine - https://dnsdumpster.com
 
 * dogpile: Dogpile search engine - www.dogpile.com
 
 * duckduckgo: DuckDuckGo search engine - www.duckduckgo.com
 
-* Exalead: a Meta search engine - www.exalead.com/search
+* exalead: a Meta search engine - www.exalead.com/search
 
 * github-code: GitHub code search engine (Requires a GitHub Personal Access Token, see below.) - www.github.com
 
 * google: Google search engine (Optional Google dorking.) - www.google.com
+
+* hackertarget: Online vulnerability scanners and network intelligence to help organizations - https://hackertarget.com
 
 * hunter: Hunter search engine (Requires an API key, see below.) - www.hunter.io
 
@@ -42,30 +44,44 @@ Passive:
 
 * linkedin: Google search engine, specific search for LinkedIn users - www.linkedin.com
 
+* linkedin_links: 
+
 * netcraft: Internet Security and Data Mining - www.netcraft.com
 
-* otx: AlienVault Open Threat Exchange - otx.alienvault.com
+* otx: AlienVault Open Threat Exchange - https://otx.alienvault.com
+
+* pentesttools: Powerful Penetration Testing Tools, Easy to Use (Needs an API key and is not free for API access) - https://pentest-tools.com/home
+
+* rapiddns: DNS query tool which make querying subdomains or sites of a same IP easy! https://rapiddns.io
 
 * securityTrails: Security Trails search engine, the world's largest repository of historical DNS data<br>
   (Requires an API key, see below.) - www.securitytrails.com
 
 * shodan: Shodan search engine, will search for ports and banners from discovered hosts - www.shodanhq.com
 
-* Spyse: Web research tools for professionals (Requires an API key.) - spyse.com
+* spyse: Web research tools for professionals (Requires an API key.) - https://spyse.com
 
-* Suip: Web research tools that can take over 10 minutes to run, but worth the wait - suip.biz
+* sublist3r: Fast subdomains enumeration tool for penetration testers - https://api.sublist3r.com/search.php?domain=example.com
+
+* Suip: Web research tools that can take over 10 minutes to run, but worth the wait - https://suip.biz
 
 * threatcrowd: Open source threat intelligence - www.threatcrowd.org
+
+* threatminer: Data mining for threat intelligence - https://www.threatminer.org/
 
 * trello: Search trello boards (Uses Google search.)
 
 * twitter: Twitter accounts related to a specific domain (Uses Google search.)
+
+* urlscan: A sandbox for the web that is a URL and website scanner - https://urlscan.io
 
 * vhost: Bing virtual hosts search
 
 * virustotal: virustotal.com domain search
 
 * yahoo: Yahoo search engine
+
+* all:
 
 
 Active:
@@ -75,12 +91,13 @@ Active:
 
 Modules that require an API key:
 --------------------------------
-Add your keys to api-keys.yaml
+Documentation to setup API keys can be found at - https://github.com/laramies/theHarvester/wiki/Installation#api-keys
 
 * bing
 * github
 * hunter
 * intelx
+* pentesttools
 * securityTrails
 * shodan
 * spyse

@@ -33,12 +33,14 @@ class SearchLinkedin:
                     return
         except Exception as e:
             print(e)
-        await asyncio.sleep(getDelay())
+        await asyncio.sleep(get_delay())
         self.totalresults += self.results
 
     async def get_people(self):
         rawres = myparser.Parser(self.totalresults, self.word)
-        return await rawres.people_linkedin()
+        temp = await rawres.people_linkedin()
+        return [person for person in temp
+                if person[0] != '.' and '...' not in person and len(person.split()) != 1]
 
     async def get_links(self):
         links = myparser.Parser(self.totalresults, self.word)
@@ -48,6 +50,6 @@ class SearchLinkedin:
         self.proxy = proxy
         while self.counter < self.limit:
             await self.do_search()
-            await asyncio.sleep(getDelay())
+            await asyncio.sleep(get_delay())
             self.counter += 100
             print(f'\tSearching {self.counter} results.')
