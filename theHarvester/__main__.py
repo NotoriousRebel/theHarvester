@@ -42,10 +42,11 @@ async def start(rest_args=None):
                         action='store_true')
     parser.add_argument('-f', '--filename', help='Save the results to an HTML and/or XML file.', default='', type=str)
     parser.add_argument('-b', '--source', help='''baidu, bing, bingapi, bufferoverun, certspotter, crtsh, dnsdumpster,
-                        dogpile, duckduckgo, exalead, github-code, google,
-                        hackertarget, hunter, intelx, linkedin, linkedin_links, netcraft, otx, pentesttools,
-                        rapiddns, securityTrails, spyse, suip, threatcrowd,
-                        trello, twitter, vhost, virustotal, yahoo, all''')
+                            dogpile, duckduckgo, exalead, github-code, google,
+                            hackertarget, hunter, intelx, linkedin, linkedin_links, netcraft, otx, pentesttools,
+                            rapiddns, securityTrails, spyse, sublist3r, suip, threatcrowd, threatminer,
+                            trello, twitter, urlscan, virustotal, yahoo, all''')
+
     # determines if filename is coming from rest api or user
     rest_filename = ""
     # indicates this from the rest API
@@ -102,8 +103,7 @@ async def start(rest_args=None):
 
         :param search_engine: search engine to fetch details from
         :param source: source against which the details (corresponding to the search engine) need to be persisted
-        :param process_param: any parameters to be passed to the search engine
-                              eg: Google needs google_dorking
+        :param process_param: any parameters to be passed to the search engine eg: Google needs google_dorking
         :param store_host: whether to store hosts
         :param store_emails: whether to store emails
         :param store_ip: whether to store IP address
@@ -696,8 +696,8 @@ async def start(rest_args=None):
                 try:
                     import aiofiles
                     async with aiofiles.open(
-                            f'theHarvester/lib/web/static/{rest_filename}.html' if '.html' not in rest_filename
-                            else f'theHarvester/lib/web/static/{rest_filename}', 'w+') as Html_file:
+                            f'theHarvester/lib/app/static/{rest_filename}.html' if '.html' not in rest_filename
+                            else f'theHarvester/lib/app/static/{rest_filename}', 'w+') as Html_file:
                         await Html_file.write(HTMLcode)
                 except Exception as ex:
                     print(f"An excpetion has occurred: {ex}")
@@ -716,7 +716,7 @@ async def start(rest_args=None):
             if len(rest_filename) == 0:
                 filename = filename.rsplit('.', 1)[0] + '.xml'
             else:
-                filename = 'theHarvester/lib/web/static/' \
+                filename = 'theHarvester/lib/app/static/' \
                            + rest_filename.rsplit('.', 1)[0] + '.xml'
             # TODO use aiofiles if user is using rest api
             with open(filename, 'w+') as file:
@@ -758,8 +758,8 @@ async def start(rest_args=None):
                 file.write('</theHarvester>')
             if len(rest_filename) > 0:
                 return list(set(all_emails)), return_ips, full, f'/static/{rest_filename}.html', \
-                       f'/static/{filename[filename.find("/static/") + 8:]}' if '/static/' in filename \
-                           else f'/static/{filename}'
+                    f'/static/{filename[filename.find("/static/") + 8:]}' if '/static/' in filename \
+                    else f'/static/{filename} '
             print('[*] Files saved.')
         except Exception as er:
             print(f'\033[93m[!] An error occurred while saving the XML file: {er} \033[0m')

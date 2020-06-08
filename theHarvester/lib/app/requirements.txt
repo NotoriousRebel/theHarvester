@@ -1,3 +1,4 @@
+argparse
 aiodns==2.0.0
 aiofiles==0.5.0
 aiohttp==3.6.2
@@ -6,6 +7,7 @@ beautifulsoup4==4.9.1
 dnspython==1.16.0
 fastapi==0.55.1
 netaddr==0.7.19
+orjson>=3,<4
 plotly==4.8.1
 PyYAML==5.3.1
 requests==2.23.0
