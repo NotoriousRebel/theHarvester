@@ -19,6 +19,7 @@ class ActivityClass(StrEnum):
 ACTION_ACTIVITIES: Final = {
     'dns-brute': ActivityClass.DNS,
     'dns-lookup': ActivityClass.DNS,
+    'dns-recursive': ActivityClass.DNS,
     'dns-resolve': ActivityClass.DNS,
     'shodan': ActivityClass.PASSIVE,
     'api-scan': ActivityClass.DIRECT,
