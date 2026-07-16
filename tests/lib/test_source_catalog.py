@@ -191,6 +191,7 @@ def test_existing_action_options_have_one_activity_class() -> None:
     assert ACTION_ACTIVITIES == {
         'dns-brute': ActivityClass.DNS,
         'dns-lookup': ActivityClass.DNS,
+        'dns-recursive': ActivityClass.DNS,
         'dns-resolve': ActivityClass.DNS,
         'shodan': ActivityClass.PASSIVE,
         'api-scan': ActivityClass.DIRECT,

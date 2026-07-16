@@ -22,6 +22,7 @@ class Derivation(StrEnum):
     PROVIDER = 'provider'
     RELATED = 'related'
     EXTERNAL_RELATIONSHIP = 'external-relationship'
+    RECURSIVE_DNS = 'recursive-dns'
 
 
 class ScopeClass(StrEnum):
@@ -50,6 +51,21 @@ class RunStatus(StrEnum):
     COMPLETE = 'complete'
     PARTIAL = 'partial'
     FAILED = 'failed'
+
+
+@dataclass(frozen=True, slots=True)
+class RecursiveDNSLimits:
+    depth: int
+    query_limit: int
+    runtime_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.depth <= 0:
+            raise ValueError('recursive DNS depth must be greater than zero')
+        if self.query_limit <= 0:
+            raise ValueError('recursive DNS query limit must be greater than zero')
+        if self.runtime_seconds <= 0:
+            raise ValueError('recursive DNS runtime must be greater than zero')
 
 
 class SourceRateLimitedError(Exception):
@@ -264,6 +280,7 @@ class DiscoveryObservation:
     collected_at: datetime
     scope_class: ScopeClass
     provider_observed_at: datetime | None = None
+    parent: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         result = {
@@ -278,6 +295,8 @@ class DiscoveryObservation:
         }
         if self.provider_observed_at is not None:
             result['provider_observed_at'] = self.provider_observed_at.isoformat()
+        if self.parent is not None:
+            result['parent'] = self.parent
         return result
 
 
@@ -330,9 +349,13 @@ class SourceExecution:
     observation_count: int
     entity_count: int
     error_type: str | None = None
+    query_count: int | None = None
+    depth_reached: int | None = None
+    zero_yield_batches: int | None = None
+    stop_reason: str | None = None
 
     def to_dict(self) -> dict[str, str | float | int | None]:
-        return {
+        result: dict[str, str | float | int | None] = {
             'run_id': self.run_id,
             'source': self.source,
             'source_family': self.source_family,
@@ -343,6 +366,15 @@ class SourceExecution:
             'entity_count': self.entity_count,
             'error_type': self.error_type,
         }
+        if self.query_count is not None:
+            result['query_count'] = self.query_count
+        if self.depth_reached is not None:
+            result['depth_reached'] = self.depth_reached
+        if self.zero_yield_batches is not None:
+            result['zero_yield_batches'] = self.zero_yield_batches
+        if self.stop_reason is not None:
+            result['stop_reason'] = self.stop_reason
+        return result
 
 
 @dataclass(frozen=True)
@@ -483,6 +515,8 @@ _RESOLVER_VANTAGE_COUNT = 3
 _RESOLVER_QUORUM = 2
 _WILDCARD_PROBES_PER_DEPTH = 3
 _MAX_CNAME_DEPTH = 16
+_RECURSIVE_BATCH_SIZE = 50
+_MAX_ZERO_YIELD_BATCHES = 3
 
 
 def _normalize_dns_response(response: DNSResponse) -> DNSResponse:
@@ -821,4 +855,216 @@ async def validate_unvalidated_entities(
         completed_at=datetime.now(UTC),
         dns_validations=(*result.dns_validations, *validations),
         entities=tuple(validated_by_value.get(entity.value, entity) for entity in result.entities),
+    )
+
+
+async def run_recursive_dns(
+    result: RunResult,
+    resolver_vantages: Sequence[ResolverVantage],
+    labels: Sequence[str],
+    limits: RecursiveDNSLimits,
+) -> RunResult:
+    """Expand confirmed in-scope parents with bounded breadth-first DNS discovery."""
+    if (
+        len(resolver_vantages) != _RESOLVER_VANTAGE_COUNT
+        or len({resolver.name for resolver in resolver_vantages}) != _RESOLVER_VANTAGE_COUNT
+    ):
+        raise ValueError('recursive DNS discovery requires exactly three distinct resolver vantages')
+
+    started = time.perf_counter()
+    deadline = started + limits.runtime_seconds
+    normalized_labels: list[str] = []
+    for value in labels:
+        if time.perf_counter() >= deadline:
+            break
+        try:
+            label = _normalize_hostname(value)
+        except (UnicodeError, ValueError):
+            continue
+        if (
+            '.' in label
+            or len(label) > 63
+            or label.startswith('-')
+            or label.endswith('-')
+            or not all(character.isascii() and (character.isalnum() or character in {'-', '_'}) for character in label)
+        ):
+            continue
+        normalized_labels.append(label)
+    candidate_labels = tuple(dict.fromkeys(normalized_labels))
+    frontier = sorted(
+        entity.value
+        for entity in result.entities
+        if ScopeClass.IN_SCOPE in entity.scope_classes and entity.addressability is Addressability.CURRENT
+    )
+    seen = {entity.value for entity in result.entities}
+    observations = list(result.observations)
+    validations = list(result.dns_validations)
+    entities = list(result.entities)
+    query_count = 0
+    completed_depth = 0
+    total_zero_yield_batches = 0
+    consecutive_zero_yield_batches = 0
+    currently_addressable_count = 0
+    stopped = time.perf_counter() >= deadline
+    stop_reason = 'runtime-limit' if stopped else 'frontier-exhausted'
+
+    for depth in range(1, 1 if stopped else limits.depth + 1):
+        next_frontier: list[str] = []
+        for parent in frontier:
+            parent_candidates = []
+            for label in candidate_labels:
+                if time.perf_counter() >= deadline:
+                    stop_reason = 'runtime-limit'
+                    stopped = True
+                    break
+                candidate = f'{label}.{parent}'
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                if _classify_scope(result.target, candidate, Derivation.RECURSIVE_DNS) is ScopeClass.IN_SCOPE:
+                    parent_candidates.append(candidate)
+            if stopped:
+                break
+            if not parent_candidates:
+                continue
+            if limits.query_limit - query_count < 12:
+                stop_reason = 'query-limit'
+                stopped = True
+                break
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                stop_reason = 'runtime-limit'
+                stopped = True
+                break
+
+            control_queries = tuple(f'th-{uuid4().hex}.{parent}' for _ in range(_WILDCARD_PROBES_PER_DEPTH))
+            query_count += len(control_queries) * len(resolver_vantages)
+            try:
+                async with asyncio.timeout(remaining):
+                    controls = tuple(
+                        await asyncio.gather(
+                            *(
+                                _query_dns(
+                                    result.run_id,
+                                    parent,
+                                    query_name,
+                                    resolver,
+                                    wildcard_depth=parent,
+                                )
+                                for query_name in control_queries
+                                for resolver in resolver_vantages
+                            )
+                        )
+                    )
+            except TimeoutError:
+                stop_reason = 'runtime-limit'
+                stopped = True
+                break
+            validations.extend(controls)
+
+            for offset in range(0, len(parent_candidates), _RECURSIVE_BATCH_SIZE):
+                remaining_queries = limits.query_limit - query_count
+                batch_size = min(_RECURSIVE_BATCH_SIZE, remaining_queries // len(resolver_vantages))
+                if batch_size <= 0:
+                    stop_reason = 'query-limit'
+                    stopped = True
+                    break
+                batch = parent_candidates[offset : offset + batch_size]
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    stop_reason = 'runtime-limit'
+                    stopped = True
+                    break
+                query_count += len(batch) * len(resolver_vantages)
+                try:
+                    async with asyncio.timeout(remaining):
+                        answers = tuple(
+                            await asyncio.gather(
+                                *(
+                                    _query_dns(result.run_id, candidate, candidate, resolver)
+                                    for candidate in batch
+                                    for resolver in resolver_vantages
+                                )
+                            )
+                        )
+                except TimeoutError:
+                    stop_reason = 'runtime-limit'
+                    stopped = True
+                    break
+
+                collected_at = datetime.now(UTC)
+                batch_yield = 0
+                for index, candidate in enumerate(batch):
+                    candidate_validations = answers[index * len(resolver_vantages) : (index + 1) * len(resolver_vantages)]
+                    validations.extend(candidate_validations)
+                    observation = DiscoveryObservation(
+                        run_id=result.run_id,
+                        target=result.target,
+                        value=candidate,
+                        source='action:dns-recursive',
+                        source_family='dns-recursive',
+                        derivation=Derivation.RECURSIVE_DNS,
+                        collected_at=collected_at,
+                        scope_class=ScopeClass.IN_SCOPE,
+                        parent=parent,
+                    )
+                    addressability = _classify_addressability(candidate_validations, controls)
+                    observations.append(observation)
+                    entities.append(
+                        MergedEntity(
+                            candidate,
+                            (observation,),
+                            addressability,
+                            (*candidate_validations, *controls),
+                        )
+                    )
+                    if addressability is Addressability.CURRENT:
+                        next_frontier.append(candidate)
+                        currently_addressable_count += 1
+                        batch_yield += 1
+
+                if batch_yield:
+                    consecutive_zero_yield_batches = 0
+                else:
+                    consecutive_zero_yield_batches += 1
+                    total_zero_yield_batches += 1
+                    if consecutive_zero_yield_batches >= _MAX_ZERO_YIELD_BATCHES:
+                        stop_reason = 'zero-yield'
+                        stopped = True
+                        break
+            if stopped:
+                break
+        if stopped:
+            break
+        completed_depth = depth
+        frontier = sorted(next_frontier)
+        if not frontier:
+            stop_reason = 'frontier-exhausted'
+            break
+    else:
+        if not stopped:
+            stop_reason = 'depth-limit'
+
+    duration_ms = (time.perf_counter() - started) * 1000
+    execution = SourceExecution(
+        run_id=result.run_id,
+        source='action:dns-recursive',
+        source_family='dns-recursive',
+        status=SourceStatus.SUCCEEDED if currently_addressable_count else SourceStatus.EMPTY,
+        duration_ms=duration_ms,
+        result_count=currently_addressable_count,
+        observation_count=len(observations) - len(result.observations),
+        entity_count=len(entities) - len(result.entities),
+        query_count=query_count,
+        depth_reached=completed_depth,
+        zero_yield_batches=total_zero_yield_batches,
+        stop_reason=stop_reason,
+    )
+    return replace(
+        result,
+        completed_at=datetime.now(UTC),
+        source_executions=(*result.source_executions, execution),
+        observations=tuple(observations),
+        dns_validations=tuple(validations),
+        entities=tuple(entities),
     )
