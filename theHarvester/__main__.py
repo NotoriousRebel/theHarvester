@@ -78,6 +78,7 @@ from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker, stash
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
 from theHarvester.lib.output import print_linkedin_sections, print_section, sorted_unique
+from theHarvester.lib.run import LegacyHostnameSource, execute_run, legacy_hostnames
 from theHarvester.screenshot.screenshot import ScreenShotter
 
 if TYPE_CHECKING:
@@ -330,6 +331,7 @@ async def start(rest_args: argparse.Namespace | None = None):
         store_results: bool = False,
         store_interestingurls: bool = False,
         store_asns: bool = False,
+        evidence_source: LegacyHostnameSource | None = None,
     ) -> None:
         """Persist details into the database.
         The details to be stored are controlled by the parameters passed to the method.
@@ -345,20 +347,28 @@ async def start(rest_args: argparse.Namespace | None = None):
         :param store_results: whether to fetch details from get_results() and persist
         :param store_interestingurls: whether to store interesting urls
         :param store_asns: whether to store asns
+        :param evidence_source: optional adapter for a source migrated to the evidence-bearing run path
         """
-        (
-            await search_engine.process(use_proxy)
-            if process_param is None
-            else await search_engine.process(process_param, use_proxy)
-        )
+        run_result = None
+        if evidence_source is None:
+            (
+                await search_engine.process(use_proxy)
+                if process_param is None
+                else await search_engine.process(process_param, use_proxy)
+            )
+        else:
+            run_result = await execute_run(word, evidence_source)
         db_stash = stash.StashManager()
 
         if source:
             print(f'[*] Searching {source[0].upper() + source[1:]}. ')
 
         if store_host:
-            host_names = list({host for host in await search_engine.get_hostnames() if f'.{word}' in host})
-            host_names = list(host_names)
+            host_names = (
+                legacy_hostnames(run_result)
+                if run_result is not None
+                else list({host for host in await search_engine.get_hostnames() if f'.{word}' in host})
+            )
             if source != 'hackertarget' and source != 'pentesttools' and source != 'rapiddns':
                 # If a source is inside this conditional, it means the hosts returned must be resolved to obtain ip
                 # This should only be checked if --dns-resolve has a wordlist
@@ -617,7 +627,13 @@ async def start(rest_args: argparse.Namespace | None = None):
                 elif engineitem == 'crtsh':
                     try:
                         crtsh_search = crtsh.SearchCrtsh(word)
-                        stor_lst.append(store(crtsh_search, 'CRTsh', store_host=True))
+                        evidence_source = LegacyHostnameSource(
+                            name='CRTsh',
+                            family='certificate-transparency',
+                            search=crtsh_search,
+                            proxy=use_proxy,
+                        )
+                        stor_lst.append(store(crtsh_search, 'CRTsh', store_host=True, evidence_source=evidence_source))
                     except Exception as e:
                         print(f'[!] A timeout occurred with crtsh, cannot find {args.domain}\n {e}')
 
