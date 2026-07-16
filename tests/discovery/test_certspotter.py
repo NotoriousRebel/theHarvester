@@ -1,40 +1,160 @@
-#!/usr/bin/env python3
-# coding=utf-8
-import os
-from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import pytest
-import httpx
 
 from theHarvester.discovery import certspottersearch
-from theHarvester.lib.core import *
-
-github_ci: Optional[str] = os.getenv(
-    "GITHUB_ACTIONS"
-)  # Github set this to be the following: true instead of True
 
 
-class TestCertspotter(object):
-    @staticmethod
-    def domain() -> str:
-        return "metasploit.com"
+@pytest.mark.asyncio
+async def test_process_collects_normalized_scoped_names_across_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = [
+        [
+            {
+                'id': 'issuance-1',
+                'dns_names': [
+                    'WWW.Example.COM.',
+                    '*.API.example.com',
+                    'example.com',
+                    'outside.test',
+                    None,
+                    ' ',
+                ],
+            },
+            {'id': 'issuance-2', 'dns_names': ['www.example.com']},
+        ],
+        [{'id': 'issuance-3', 'dns_names': ['mail.example.com', '*.deep.example.com']}],
+        [],
+    ]
+    requested_urls: list[str] = []
+
+    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[object]:
+        requested_urls.extend(urls)
+        return [pages.pop(0)]
+
+    monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    search = certspottersearch.SearchCertspoter('Example.COM.')
+    await search.process(proxy=True)
+
+    assert await search.get_hostnames() == {
+        'api.example.com',
+        'deep.example.com',
+        'example.com',
+        'mail.example.com',
+        'www.example.com',
+    }
+    assert [parse_qs(urlparse(url).query) for url in requested_urls] == [
+        {'domain': ['example.com'], 'include_subdomains': ['true'], 'expand': ['dns_names']},
+        {
+            'domain': ['example.com'],
+            'include_subdomains': ['true'],
+            'expand': ['dns_names'],
+            'after': ['issuance-2'],
+        },
+        {
+            'domain': ['example.com'],
+            'include_subdomains': ['true'],
+            'expand': ['dns_names'],
+            'after': ['issuance-3'],
+        },
+    ]
 
 
-@pytest.mark.skipif(github_ci == 'true', reason="Skipping this test for now")
-class TestCertspotterSearch(object):
-    @pytest.mark.asyncio
-    async def test_api(self) -> None:
-        base_url = f"https://api.certspotter.com/v1/issuances?domain={TestCertspotter.domain()}&expand=dns_names"
-        headers = {"User-Agent": Core.get_user_agent()}
-        request = httpx.get(base_url, headers=headers)
-        assert request.status_code == 200
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response', [[], [''], [None], [{'code': 'rate_limited'}]])
+async def test_process_returns_empty_results_for_empty_malformed_or_error_responses(
+    monkeypatch: pytest.MonkeyPatch, response: list[object]
+) -> None:
+    async def fake_fetch_all(_urls: list[str], **_kwargs: object) -> list[object]:
+        return response
 
-    @pytest.mark.asyncio
-    async def test_search(self) -> None:
-        search = certspottersearch.SearchCertspoter(TestCertspotter.domain())
-        await search.process()
-        assert isinstance(await search.get_hostnames(), set)
+    monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    search = certspottersearch.SearchCertspoter('example.com')
+    await search.process()
+
+    assert await search.get_hostnames() == set()
 
 
-if __name__ == "__main__":
-    pytest.main()
+@pytest.mark.asyncio
+async def test_process_skips_malformed_entries_but_keeps_valid_page_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = [
+        [
+            None,
+            {'id': 'ignored', 'dns_names': 'not-a-list'},
+            {'id': 'cursor-1', 'dns_names': ['valid.example.com']},
+        ],
+        [],
+    ]
+
+    async def fake_fetch_all(_urls: list[str], **_kwargs: object) -> list[object]:
+        return [pages.pop(0)]
+
+    monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    search = certspottersearch.SearchCertspoter('example.com')
+    await search.process()
+
+    assert await search.get_hostnames() == {'valid.example.com'}
+
+
+@pytest.mark.asyncio
+async def test_process_preserves_completed_pages_when_a_later_request_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    call_count = 0
+
+    async def fake_fetch_all(_urls: list[str], **_kwargs: object) -> list[object]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return [[{'id': 'cursor-1', 'dns_names': ['valid.example.com']}]]
+        raise ConnectionError
+
+    monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    search = certspottersearch.SearchCertspoter('example.com')
+    await search.process()
+
+    assert await search.get_hostnames() == {'valid.example.com'}
+
+
+@pytest.mark.asyncio
+async def test_process_stops_when_the_provider_repeats_a_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = [
+        [{'id': 'repeated', 'dns_names': ['first.example.com']}],
+        [{'id': 'repeated', 'dns_names': ['second.example.com']}],
+    ]
+    requested_urls: list[str] = []
+
+    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[object]:
+        requested_urls.extend(urls)
+        return [pages.pop(0)]
+
+    monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    search = certspottersearch.SearchCertspoter('example.com')
+    await search.process()
+
+    assert await search.get_hostnames() == {'first.example.com', 'second.example.com'}
+    assert len(requested_urls) == 2
+
+
+@pytest.mark.asyncio
+async def test_process_reports_incomplete_results_at_the_request_safety_limit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(certspottersearch.SearchCertspoter, 'MAX_PAGES', 2)
+    requested_urls: list[str] = []
+
+    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[object]:
+        requested_urls.extend(urls)
+        page_number = len(requested_urls)
+        return [[{'id': f'cursor-{page_number}', 'dns_names': [f'page-{page_number}.example.com']}]]
+
+    monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    search = certspottersearch.SearchCertspoter('example.com')
+    await search.process()
+
+    assert await search.get_hostnames() == {'page-1.example.com', 'page-2.example.com'}
+    assert len(requested_urls) == 2
+    assert 'results may be incomplete' in capsys.readouterr().out
