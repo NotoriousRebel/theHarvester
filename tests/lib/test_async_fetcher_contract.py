@@ -4,16 +4,18 @@ import asyncio
 import contextlib
 import socket
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import pytest
 from aiohttp import web
 
 from theHarvester.lib.core import AsyncFetcher
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 FIXTURES_DIR = Path(__file__).parents[1] / 'fixtures'
 
