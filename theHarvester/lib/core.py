@@ -16,6 +16,7 @@ import yaml
 from aiohttp_socks import ProxyConnector
 
 from theHarvester import __version__
+from theHarvester.lib.source_catalog import canonical_source_names
 
 if TYPE_CHECKING:
     from collections.abc import Sized
@@ -276,69 +277,7 @@ class Core:
     @staticmethod
     def get_supportedengines() -> list[str]:
         """Returns a list of supported search engines."""
-        return [
-            'baidu',
-            'bevigil',
-            'bitbucket',
-            'bufferoverun',
-            'builtwith',
-            'brave',
-            'censys',
-            'certspotter',
-            'chaos',
-            'commoncrawl',
-            'criminalip',
-            'crtsh',
-            'dehashed',
-            'dnsdumpster',
-            'duckduckgo',
-            'dymo',
-            'fofa',
-            'fullhunt',
-            'github-code',
-            'gitlab',
-            'hackertarget',
-            'haveibeenpwned',
-            'hudsonrock',
-            'hunter',
-            'hunterhow',
-            'intelx',
-            'leakix',
-            'leaklookup',
-            'linkedin',
-            'linkedin_links',
-            'mojeek',
-            'netcraft',
-            'netlas',
-            'omnisint',
-            'onyphe',
-            'otx',
-            'pentesttools',
-            'projectdiscovery',
-            'rapiddns',
-            'robtex',
-            'rocketreach',
-            'securityscorecard',
-            'securityTrails',
-            'sherlockeye',
-            'shodan',
-            'shodanInternetDB',
-            'subdomaincenter',
-            'subdomainfinderc99',
-            'sublist3r',
-            'thc',
-            'threatcrowd',
-            'tomba',
-            'urlscan',
-            'venacus',
-            'virustotal',
-            'waybackarchive',
-            'whoisxml',
-            'windvane',
-            'yahoo',
-            'zoomeye',
-            'zoomeyeapi',
-        ]
+        return list(canonical_source_names())
 
     @staticmethod
     def get_user_agent() -> str:
