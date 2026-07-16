@@ -491,13 +491,21 @@ async def test_crtsh_bridge_executes_once_and_feeds_legacy_consumers(monkeypatch
     evidence_store = SQLiteRunStore(tmp_path / 'evidence.sqlite')
     captured: list[run_module.RunResult] = []
 
-    async def execute_with_temporary_store(target, source):
-        result = await run_module.execute_run(target, source, store=evidence_store)
+    async def execute_with_temporary_store(target, source, *, persist: bool = True, base_result=None):
+        assert persist is False
+        result = await run_module.execute_run(
+            target,
+            source,
+            store=evidence_store,
+            persist=False,
+            base_result=base_result,
+        )
         captured.append(result)
         return result
 
     monkeypatch.setattr(main_module.crtsh, 'SearchCrtsh', FakeCrtshSearch)
     monkeypatch.setattr(main_module.stash, 'StashManager', FakeStashManager)
+    monkeypatch.setattr(main_module, 'SQLiteRunStore', lambda: evidence_store)
     monkeypatch.setattr(main_module, 'execute_run', execute_with_temporary_store, raising=True)
 
     await main_module.start(
@@ -524,7 +532,11 @@ async def test_crtsh_bridge_executes_once_and_feeds_legacy_consumers(monkeypatch
     assert len(captured) == 1
     assert captured[0].source_executions[0].status is SourceStatus.SUCCEEDED
     assert legacy_hostnames(captured[0]) == ['www.example.com']
-    assert await evidence_store.load(captured[0].run_id) == captured[0].to_dict()
+    stored_result = await evidence_store.load(captured[0].run_id)
+    assert stored_result is not None
+    assert stored_result['run_id'] == captured[0].run_id
+    assert stored_result['status'] == 'complete'
+    assert stored_result['completed_at'] >= captured[0].completed_at.isoformat()
     assert stored == [('example.com', ('www.example.com',), 'host', 'CRTsh')]
 
 
@@ -599,8 +611,13 @@ async def test_crtsh_bridge_closes_constructed_vantages_after_partial_constructo
         async def close(self) -> None:
             closed.append(self.name)
 
+    class FakeRunStore:
+        async def save(self, _result) -> None:
+            return None
+
     monkeypatch.setattr(main_module.crtsh, 'SearchCrtsh', FakeCrtshSearch)
     monkeypatch.setattr(main_module, 'AioDNSResolverVantage', PartiallyFailingVantage, raising=True)
+    monkeypatch.setattr(main_module, 'SQLiteRunStore', FakeRunStore)
 
     await main_module.start(
         argparse.Namespace(
@@ -680,12 +697,17 @@ async def test_crtsh_bridge_uses_three_explicit_resolver_vantages(monkeypatch: p
         source: run_module.PassiveSource,
         *,
         resolver_vantages: tuple[run_module.ResolverVantage, ...] | None = None,
+        persist: bool = True,
+        base_result: run_module.RunResult | None = None,
     ) -> run_module.RunResult:
+        assert persist is False
+        assert resolver_vantages is None
         result = await run_module.execute_run(
             target,
             source,
-            resolver_vantages=resolver_vantages,
             store=evidence_store,
+            persist=False,
+            base_result=base_result,
         )
         captured.append(result)
         return result
@@ -694,6 +716,7 @@ async def test_crtsh_bridge_uses_three_explicit_resolver_vantages(monkeypatch: p
     monkeypatch.setattr(main_module.stash, 'StashManager', FakeStashManager)
     monkeypatch.setattr(main_module.hostchecker, 'Checker', FakeHostChecker)
     monkeypatch.setattr(main_module, 'AioDNSResolverVantage', FakeProductionVantage, raising=True)
+    monkeypatch.setattr(main_module, 'SQLiteRunStore', lambda: evidence_store)
     monkeypatch.setattr(main_module, 'execute_run', execute_with_temporary_store, raising=True)
 
     await main_module.start(
@@ -718,4 +741,7 @@ async def test_crtsh_bridge_uses_three_explicit_resolver_vantages(monkeypatch: p
 
     assert set(created) == {'192.0.2.53', '192.0.2.54', '192.0.2.55'}
     assert set(closed) == set(created)
-    assert captured[0].entities[0].addressability is Addressability.CURRENT
+    assert captured[0].entities[0].addressability is Addressability.UNVERIFIED
+    stored_result = await evidence_store.load(captured[0].run_id)
+    assert stored_result is not None
+    assert stored_result['entities'][0]['addressability'] == 'currently-addressable'
