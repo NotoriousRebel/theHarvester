@@ -7,7 +7,8 @@ Revised to use aiodns & asyncio on 2019-09-23
 from __future__ import annotations
 
 import asyncio
-import socket
+import ipaddress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import aiodns
@@ -16,11 +17,31 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+@dataclass(frozen=True)
+class HostEvidence:
+    ipv4: tuple[str, ...] = ()
+    ipv6: tuple[str, ...] = ()
+    cnames: tuple[str, ...] = ()
+
+    @property
+    def addresses(self) -> tuple[str, ...]:
+        return self.ipv4 + self.ipv6
+
+
 class Checker:
+    """Resolve hosts while preserving the legacy ``check()`` return tuple.
+
+    Typed A, AAAA, and CNAME values are available in ``evidence``. Existing
+    callers still receive resolved strings, retained hostnames, and IP
+    addresses from ``check()``; CNAME-only hosts use the existing plain-host
+    string form because there is no IP address to append.
+    """
+
     def __init__(self, hosts: list[str], nameservers: list[str]) -> None:
         self.hosts: list[str] = hosts
         self.realhosts: list[str] = []
         self.addresses: set[str] = set()
+        self.evidence: dict[str, HostEvidence] = {}
         self.nameservers: list[str] = nameservers
 
     # @staticmethod
@@ -36,18 +57,30 @@ class Checker:
     #         return f"{host}", tuple()
 
     @staticmethod
-    async def resolve_host(host: str, resolver: aiodns.DNSResolver) -> str:
-        try:
-            # TODO add check for ipv6 addrs as well
-            result = await resolver.getaddrinfo(host, socket.AF_INET)
-            addresses_list: list[str] = [r.addr[0] for r in result.nodes]
-            if addresses_list == [] or addresses_list is None or result is None:
-                return f'{host}:'
-            else:
-                addresses_str = ','.join(map(str, list(sorted(set(addresses_list)))))
-                return f'{host}:{addresses_str}'
-        except Exception:
-            return f'{host}:'
+    async def resolve_host(host: str, resolver: aiodns.DNSResolver) -> tuple[str, HostEvidence] | None:
+        record_types = ('A', 'AAAA', 'CNAME')
+        results = await asyncio.gather(
+            *(resolver.query_dns(host, record_type) for record_type in record_types),
+            return_exceptions=True,
+        )
+        values: dict[str, set[str]] = {record_type: set() for record_type in record_types}
+        for record_type, result in zip(record_types, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                continue
+            for record in result.answer:
+                value = getattr(record.data, 'cname' if record_type == 'CNAME' else 'addr', None)
+                if value is None:
+                    continue
+                normalized = value.rstrip('.').lower() if record_type == 'CNAME' else str(ipaddress.ip_address(value))
+                values[record_type].add(normalized)
+        evidence = HostEvidence(
+            ipv4=tuple(sorted(values['A'])),
+            ipv6=tuple(sorted(values['AAAA'])),
+            cnames=tuple(sorted(values['CNAME'])),
+        )
+        return (host, evidence) if evidence.addresses or evidence.cnames else None
 
     # https://stackoverflow.com/questions/312443/how-do-i-split-a-list-into-equally-sized-chunks
     @staticmethod
@@ -56,9 +89,9 @@ class Checker:
         for i in range(0, len(lst), n):
             yield lst[i : i + n]
 
-    async def query_all(self, resolver: aiodns.DNSResolver, hosts: list[str]) -> list[str]:
+    async def query_all(self, resolver: aiodns.DNSResolver, hosts: list[str]) -> list[tuple[str, HostEvidence] | None]:
         # TODO chunk list into 50 pieces regardless of IPs and subnets
-        results: list[str] = await asyncio.gather(*[asyncio.create_task(self.resolve_host(host, resolver)) for host in hosts])
+        results = await asyncio.gather(*[asyncio.create_task(self.resolve_host(host, resolver)) for host in hosts])
         return results
 
     async def check(self) -> tuple[list[str], list[str], list[str]]:
@@ -72,12 +105,17 @@ class Checker:
         for chunk in self.chunks(self.hosts, 50):
             # TODO split this to get IPs added total ips
             results = await self.query_all(resolver, chunk)
-            all_results.update(results)
-            for pair in results:
-                host, addresses = pair.split(':')
+            for result in results:
+                if result is None:
+                    continue
+                host, evidence = result
+                self.evidence[host] = evidence
+                addresses = ','.join(evidence.addresses)
+                legacy_result = f'{host}:{addresses}' if addresses else host
+                all_results.add(legacy_result)
                 self.realhosts.append(host)
                 # address may be a list of ips; filter out empties
-                self.addresses.update({addr for addr in addresses.split(',') if addr})
+                self.addresses.update(evidence.addresses)
                 # address may be a list of ips
                 # and do a set comprehension to remove duplicates
         self.realhosts.sort()
