@@ -427,7 +427,12 @@ class AsyncFetcher:
 
     @staticmethod
     def _normalize_data(data: str | dict[str, Any]) -> str | dict[str, Any]:
-        return json_loader.loads(data) if isinstance(data, str) else data
+        if not isinstance(data, str):
+            return data
+        try:
+            return json_loader.loads(data)
+        except ValueError:
+            return data
 
     @classmethod
     def _resolve_proxy(cls, proxy: str | bool | None) -> tuple[str | None, str | None]:
@@ -466,7 +471,7 @@ class AsyncFetcher:
         method: str,
         url: str,
         *,
-        json: bool = False,
+        response_json: bool = False,
         delay: int = 5,
         request_timeout: int | None = None,
         **request_kwargs: Any,
@@ -474,10 +479,10 @@ class AsyncFetcher:
         if request_timeout:
             async with asyncio.timeout(request_timeout):
                 async with session.request(method.upper(), url, **request_kwargs) as response:
-                    return await cls._read_response(response, json=json, delay=delay)
+                    return await cls._read_response(response, json=response_json, delay=delay)
 
         async with session.request(method.upper(), url, **request_kwargs) as response:
-            return await cls._read_response(response, json=json, delay=delay)
+            return await cls._read_response(response, json=response_json, delay=delay)
 
     @staticmethod
     def _get_random_proxy(proxy_dict: dict) -> tuple[str | None, str | None]:
@@ -520,46 +525,39 @@ class AsyncFetcher:
         params: Sized = '',
         json: bool = False,
         proxy: bool = False,
+        json_body: dict[str, Any] | None = None,
     ):
         headers = cls._default_headers(headers)
         timeout = cls._request_timeout(720)
         # By default, timeout is 5 minutes, changed to 12-minutes
         # results are well worth the wait
         try:
+            request_kwargs: dict[str, Any] = {'json': json_body} if json_body is not None else {'data': cls._normalize_data(data)}
             if proxy:
                 proxy_url, proxy_type = cls._resolve_proxy(proxy)
                 sslcontext = cls._ssl_context()
-
                 if params != '':
-                    async with await cls._build_session(headers, timeout, proxy_url, proxy_type, sslcontext) as session:
-                        return await cls._request(
-                            session,
-                            'GET',
-                            url,
-                            params=params,
-                            proxy=proxy_url if proxy_type == 'http' else None,
-                            json=json,
-                            delay=5,
-                        )
-                else:
-                    async with await cls._build_session(headers, timeout, proxy_url, proxy_type, sslcontext) as session:
-                        return await cls._request(
-                            session,
-                            'GET',
-                            url,
-                            proxy=proxy_url if proxy_type == 'http' else None,
-                            json=json,
-                            delay=5,
-                        )
+                    request_kwargs['params'] = params
+                if proxy_type == 'http':
+                    request_kwargs['proxy'] = proxy_url
+                async with await cls._build_session(headers, timeout, proxy_url, proxy_type, sslcontext) as session:
+                    return await cls._request(
+                        session,
+                        'POST',
+                        url,
+                        response_json=json,
+                        delay=5,
+                        **request_kwargs,
+                    )
             elif params == '':
                 async with await cls._build_session(headers, timeout) as session:
                     return await cls._request(
                         session,
                         'POST',
                         url,
-                        data=cls._normalize_data(data),
-                        json=json,
+                        response_json=json,
                         delay=3,
+                        **request_kwargs,
                     )
             else:
                 async with await cls._build_session(headers, timeout) as session:
@@ -567,11 +565,11 @@ class AsyncFetcher:
                         session,
                         'POST',
                         url,
-                        data=cls._normalize_data(data),
                         ssl=cls._ssl_context(),
                         params=params,
-                        json=json,
+                        response_json=json,
                         delay=3,
+                        **request_kwargs,
                     )
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
             return ''
@@ -627,7 +625,7 @@ class AsyncFetcher:
                     session,
                     method,
                     url,
-                    json=json,
+                    response_json=json,
                     delay=5,
                     request_timeout=request_timeout,
                     **request_kwargs,

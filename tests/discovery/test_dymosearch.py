@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from theHarvester.discovery import dymosearch
@@ -37,13 +39,14 @@ class TestDymoSearch:
     @pytest.mark.asyncio
     async def test_process_extracts_canonical_and_suggestion(self, monkeypatch):
         _patch_dymo_key(monkeypatch, 'token-xyz')
-        captured = {}
+        captured: dict[str, Any] = {}
 
-        async def fake_post_fetch(url, headers=None, data='', params='', json=False, proxy=False):
+        async def fake_post_fetch(url: str, **kwargs: Any) -> dict[str, Any]:
             captured['url'] = url
-            captured['headers'] = headers
-            captured['data'] = data
-            captured['proxy'] = proxy
+            captured['headers'] = kwargs.get('headers')
+            captured['data'] = kwargs.get('data', '')
+            captured['json_body'] = kwargs.get('json_body')
+            captured['proxy'] = kwargs.get('proxy', False)
             return {
                 'domain': {
                     'valid': True,
@@ -68,7 +71,8 @@ class TestDymoSearch:
 
         assert captured['url'] == dymosearch.SearchDymo.VERIFY_URL
         assert captured['proxy'] is True
-        assert captured['data'] == {'domain': 'exemple.com', 'url': 'https://exemple.com'}
+        assert captured['data'] == ''
+        assert captured['json_body'] == {'domain': 'exemple.com', 'url': 'https://exemple.com'}
         assert captured['headers']['Authorization'] == 'Bearer token-xyz'
 
         hosts = await search.get_hostnames()
@@ -82,7 +86,7 @@ class TestDymoSearch:
     async def test_process_handles_empty_payload(self, monkeypatch):
         _patch_dymo_key(monkeypatch, 'token')
 
-        async def fake_post_fetch(url, headers=None, data='', params='', json=False, proxy=False):
+        async def fake_post_fetch(_url: str, **_kwargs: Any) -> dict[str, Any]:
             return {}
 
         import theHarvester.lib.core as core_module
@@ -98,7 +102,7 @@ class TestDymoSearch:
     async def test_process_ignores_unrelated_suggestion(self, monkeypatch):
         _patch_dymo_key(monkeypatch, 'token')
 
-        async def fake_post_fetch(url, headers=None, data='', params='', json=False, proxy=False):
+        async def fake_post_fetch(_url: str, **_kwargs: Any) -> dict[str, Any]:
             return {
                 'domain': {
                     'valid': True,
@@ -120,7 +124,7 @@ class TestDymoSearch:
     async def test_process_handles_non_dict_response(self, monkeypatch):
         _patch_dymo_key(monkeypatch, 'token')
 
-        async def fake_post_fetch(url, headers=None, data='', params='', json=False, proxy=False):
+        async def fake_post_fetch(_url: str, **_kwargs: Any) -> str:
             return '<html>error</html>'
 
         import theHarvester.lib.core as core_module
