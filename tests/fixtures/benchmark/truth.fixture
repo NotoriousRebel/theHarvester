@@ -1,0 +1,62 @@
+{
+  "fixture_id": "synthetic-v1",
+  "expected_in_scope": [
+    "api.benchmark.test",
+    "ipv6.benchmark.test",
+    "alias.benchmark.test",
+    "disputed.benchmark.test",
+    "ghost.dev.benchmark.test",
+    "nodata.benchmark.test",
+    "missing.benchmark.test"
+  ],
+  "dns_outcomes": {
+    "api.benchmark.test": "currently-addressable",
+    "ipv6.benchmark.test": "currently-addressable",
+    "alias.benchmark.test": "currently-addressable",
+    "disputed.benchmark.test": "resolver-disputed",
+    "ghost.dev.benchmark.test": "wildcard-uncertain",
+    "nodata.benchmark.test": "not-currently-addressable",
+    "missing.benchmark.test": "not-currently-addressable"
+  },
+  "wildcard_ancestry": {
+    "ghost.dev.benchmark.test": "dev.benchmark.test"
+  },
+  "scope_extensions": [
+    "related.example.test"
+  ],
+  "external_relationships": [
+    "cdn.vendor.test"
+  ],
+  "source_payloads": {
+    "fixture-a": [
+      "api.benchmark.test",
+      "alias.benchmark.test",
+      "disputed.benchmark.test",
+      "ghost.dev.benchmark.test",
+      "nodata.benchmark.test",
+      "related.example.test",
+      "cdn.vendor.test"
+    ],
+    "fixture-a-mirror": [
+      "api.benchmark.test",
+      "alias.benchmark.test"
+    ],
+    "fixture-b": [
+      "api.benchmark.test",
+      "ipv6.benchmark.test",
+      "missing.benchmark.test"
+    ]
+  },
+  "primary_truth": [
+    "api.benchmark.test",
+    "ipv6.benchmark.test",
+    "alias.benchmark.test"
+  ],
+  "known_inventory": [
+    "api.benchmark.test",
+    "ipv6.benchmark.test"
+  ],
+  "known_false": [
+    "ghost.dev.benchmark.test"
+  ]
+}
