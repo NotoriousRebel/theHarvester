@@ -17,6 +17,7 @@ from starlette.staticfiles import StaticFiles
 
 from theHarvester import __main__
 from theHarvester.lib.api.additional_endpoints import router as additional_router
+from theHarvester.lib.source_catalog import resolve_sources
 
 API_RATE_LIMIT = os.getenv('API_RATE_LIMIT', '5/minute')
 
@@ -316,14 +317,13 @@ async def query(
         return response
 
     try:
-        # Validate sources
-        supported_engines = __main__.Core.get_supportedengines()
-        for s in source:
-            if s not in supported_engines:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Source '{s}' is not supported. Supported sources: {', '.join(supported_engines)}",
-                )
+        try:
+            source_plan = resolve_sources(source)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'{error}. Supported sources: {", ".join(__main__.Core.get_supportedengines())}',
+            ) from error
 
         if api_scan and not await _is_public_target(domain):
             raise HTTPException(
@@ -352,7 +352,7 @@ async def query(
                 limit=limit,
                 proxies=proxies,
                 shodan=shodan,
-                source=','.join(source),
+                source='all' if source_plan.excluded else ','.join(source_plan.names),
                 start=start,
                 take_over=take_over,
                 wordlist=wordlist,
