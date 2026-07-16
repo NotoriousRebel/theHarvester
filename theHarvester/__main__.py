@@ -9,6 +9,7 @@ import time
 import traceback
 from collections.abc import Awaitable
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from typing import Any
 
 import anyio
@@ -79,8 +80,32 @@ from theHarvester.discovery import (
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker, stash
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
-from theHarvester.lib.output import print_linkedin_sections, print_section, sorted_unique
-from theHarvester.lib.run import AioDNSResolverVantage, LegacyHostnameSource, execute_run, legacy_hostnames
+from theHarvester.lib.output import (
+    evidence_xml_fragment,
+    format_run_terminal,
+    legacy_json_result,
+    print_linkedin_sections,
+    print_section,
+    run_result_jsonl,
+    sorted_unique,
+)
+from theHarvester.lib.run import (
+    AioDNSResolverVantage,
+    LegacyHostnameSource,
+    SourceExecution,
+    SourceRateLimitedError,
+    SourceSkippedError,
+    SourceStatus,
+    SQLiteRunStore,
+    StageFinding,
+    StageFindingKind,
+    StageResult,
+    begin_run,
+    complete_run,
+    execute_run,
+    legacy_hostnames,
+    validate_unvalidated_entities,
+)
 from theHarvester.lib.source_catalog import SourceSchedule, canonical_source_names, describe_activity, resolve_sources
 from theHarvester.screenshot.screenshot import ScreenShotter
 
@@ -220,7 +245,7 @@ def selected_actions(args: argparse.Namespace) -> tuple[str, ...]:
     )
 
 
-async def start(rest_args: argparse.Namespace | None = None):
+async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_run: bool = False):
     """Main program function"""
     parser = build_parser()
 
@@ -233,11 +258,12 @@ async def start(rest_args: argparse.Namespace | None = None):
         elif rest_args.dns_brute:
             args = rest_args
             dnsbrute = (rest_args.dns_brute, True)
+            filename = args.filename
         else:
             args = rest_args
             dnsbrute = (args.dns_brute, False)
             # We need to make sure the filename is random as to not overwrite other files
-            filename: str = args.filename
+            filename = args.filename
             alphabet = string.ascii_letters + string.digits
             rest_filename += f'{"".join(secrets.choice(alphabet) for _ in range(32))}_{filename}' if len(filename) != 0 else ''
     else:
@@ -353,8 +379,40 @@ async def start(rest_args: argparse.Namespace | None = None):
 
     interesting_urls = []
     total_asns = []
+    completed_run_result = begin_run(word)
+    stage_results: list[StageResult] = []
+    dns_resolution_findings: list[StageFinding] = []
+    dns_resolution_errors: list[Exception] = []
+    dns_resolution_started = time.perf_counter()
+
+    def record_stage_result(
+        source: str,
+        started: float,
+        findings: list[StageFinding] | tuple[StageFinding, ...] = (),
+        error: Exception | None = None,
+    ) -> None:
+        unique_findings = tuple(dict.fromkeys(findings))
+        if isinstance(error, SourceRateLimitedError):
+            status = SourceStatus.RATE_LIMITED
+        elif isinstance(error, SourceSkippedError):
+            status = SourceStatus.SKIPPED
+        elif error is not None:
+            status = SourceStatus.FAILED
+        else:
+            status = SourceStatus.SUCCEEDED if unique_findings else SourceStatus.EMPTY
+        stage_results.append(
+            StageResult(
+                source=source,
+                status=status,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                result_count=len(findings),
+                findings=unique_findings,
+                error_type=type(error).__name__ if error is not None else None,
+            )
+        )
 
     execution_schedule = SourceSchedule(source_plan)
+    source_families = {source.name: source.family for source in source_plan.sources}
 
     async def _store(
         search_engine: Any,
@@ -369,7 +427,8 @@ async def start(rest_args: argparse.Namespace | None = None):
         store_interestingurls: bool = False,
         store_asns: bool = False,
         evidence_source: LegacyHostnameSource | None = None,
-    ) -> None:
+        stage_findings: list[StageFinding] | None = None,
+    ) -> SourceExecution | None:
         """Persist details into the database.
         The details to be stored are controlled by the parameters passed to the method.
 
@@ -386,6 +445,7 @@ async def start(rest_args: argparse.Namespace | None = None):
         :param store_asns: whether to store asns
         :param evidence_source: optional adapter for a source migrated to the evidence-bearing run path
         """
+        nonlocal completed_run_result
         run_result = None
         if evidence_source is None:
             (
@@ -394,16 +454,13 @@ async def start(rest_args: argparse.Namespace | None = None):
                 else await search_engine.process(process_param, use_proxy)
             )
         else:
-            if len(final_dns_resolver_list) == 3:
-                resolver_vantages: list[AioDNSResolverVantage] = []
-                async with AsyncExitStack() as resolver_stack:
-                    for nameserver in final_dns_resolver_list:
-                        resolver = AioDNSResolverVantage(nameserver)
-                        resolver_vantages.append(resolver)
-                        resolver_stack.push_async_callback(resolver.close)
-                    run_result = await execute_run(word, evidence_source, resolver_vantages=resolver_vantages)
-            else:
-                run_result = await execute_run(word, evidence_source)
+            run_result = await execute_run(
+                word,
+                evidence_source,
+                persist=False,
+                base_result=completed_run_result,
+            )
+            completed_run_result = run_result
         db_stash = stash.StashManager()
 
         if source:
@@ -422,13 +479,18 @@ async def start(rest_args: argparse.Namespace | None = None):
                     # indicates that -r was passed in if dnsresolve is None
                     full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
                     # If full, this is only getting resolved hosts
-                    (
-                        resolved_pair,
-                        _temp_hosts,
-                        temp_ips,
-                    ) = await full_hosts_checker.check()
+                    try:
+                        (
+                            resolved_pair,
+                            _temp_hosts,
+                            temp_ips,
+                        ) = await full_hosts_checker.check()
+                    except Exception as error:
+                        dns_resolution_errors.append(error)
+                        raise
                     all_ip.extend(temp_ips)
                     full.extend(resolved_pair)
+                    dns_resolution_findings.extend(StageFinding(StageFindingKind.HOSTNAME, host) for host in resolved_pair)
                     # full.extend(temp_hosts)
                 else:
                     full.extend(host_names)
@@ -436,16 +498,22 @@ async def start(rest_args: argparse.Namespace | None = None):
                 full.extend(host_names)
             all_hosts.extend(host_names)
             await db_stash.store_all(word, all_hosts, 'host', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.HOSTNAME, host) for host in host_names)
 
         if store_emails:
             email_list = await search_engine.get_emails()
             all_emails.extend(email_list)
             await db_stash.store_all(word, email_list, 'email', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.EMAIL, email) for email in email_list)
 
         if store_ip:
             ips_list = await search_engine.get_ips()
             all_ip.extend(ips_list)
             await db_stash.store_all(word, all_ip, 'ip', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.IP_ADDRESS, str(ip)) for ip in ips_list)
 
         if store_results:
             email_list, host_names, urls = await search_engine.get_results()
@@ -455,29 +523,45 @@ async def start(rest_args: argparse.Namespace | None = None):
             all_hosts.extend(host_names)
             await db.store_all(word, all_hosts, 'host', source)
             await db.store_all(word, all_emails, 'email', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.EMAIL, email) for email in email_list)
+                stage_findings.extend(StageFinding(StageFindingKind.HOSTNAME, host) for host in host_names)
+                stage_findings.extend(StageFinding(StageFindingKind.URL, url) for url in urls)
 
         if store_people:
             people_list = await search_engine.get_people()
             all_people.extend(people_list)
             await db_stash.store_all(word, people_list, 'people', source)
+            if stage_findings is not None:
+                stage_findings.extend(
+                    StageFinding(StageFindingKind.PERSON, ujson.dumps(person, sort_keys=True)) for person in people_list
+                )
 
         if store_links:
             links = await search_engine.get_links()
             linkedin_links_tracker.extend(links)
             if len(links) > 0:
                 await db.store_all(word, links, 'linkedinlinks', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.URL, link) for link in links)
 
         if store_interestingurls:
             iurls = await search_engine.get_interestingurls()
             interesting_urls.extend(iurls)
             if len(iurls) > 0:
                 await db.store_all(word, iurls, 'interestingurls', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.INTERESTING_URL, url) for url in iurls)
 
         if store_asns:
             fasns = await search_engine.get_asns()
             total_asns.extend(fasns)
             if len(fasns) > 0:
                 await db.store_all(word, fasns, 'asns', source)
+            if stage_findings is not None:
+                stage_findings.extend(StageFinding(StageFindingKind.ASN, str(asn)) for asn in fasns)
+
+        return run_result.source_executions[-1] if run_result is not None else None
 
     def store(
         search_engine: Any,
@@ -487,7 +571,50 @@ async def start(rest_args: argparse.Namespace | None = None):
         **kwargs: Any,
     ) -> Awaitable[None]:
         execution_schedule.register(source, catalog_adapter if catalog_adapter is not None else search_engine)
-        return _store(search_engine, source, *args, **kwargs)
+
+        async def run_stage() -> None:
+            findings: list[StageFinding] = []
+            started = time.perf_counter()
+            execution = None
+            status = SourceStatus.FAILED
+            error_type = None
+            try:
+                kwargs['stage_findings'] = findings
+                execution = await _store(
+                    search_engine,
+                    source,
+                    *args,
+                    **kwargs,
+                )
+                status = (
+                    execution.status if execution is not None else (SourceStatus.SUCCEEDED if findings else SourceStatus.EMPTY)
+                )
+            except SourceRateLimitedError:
+                status = SourceStatus.RATE_LIMITED
+                raise
+            except (SourceSkippedError, MissingKey):
+                status = SourceStatus.SKIPPED
+                raise
+            except Exception as error:
+                error_type = type(error).__name__
+                raise
+            finally:
+                unique_findings = tuple(dict.fromkeys(findings))
+                stage_results.append(
+                    StageResult(
+                        source=source,
+                        source_family=(
+                            execution.source_family if execution is not None else source_families.get(source.casefold(), source)
+                        ),
+                        status=status,
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        result_count=execution.result_count if execution is not None else len(findings),
+                        findings=unique_findings,
+                        error_type=execution.error_type if execution is not None else error_type,
+                    )
+                )
+
+        return run_stage()
 
     stor_lst = []
     if args.source is not None:
@@ -1451,24 +1578,25 @@ async def start(rest_args: argparse.Namespace | None = None):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     await handler(lst=stor_lst)
-    return_ips: list = []
-    if rest_args is not None and len(rest_filename) == 0 and rest_args.dns_brute is False:
-        # Indicates user is using REST api but not wanting output to be saved to a file
-        # cast to string so Rest API can understand the type
-        return_ips.extend([str(ip) for ip in sorted([netaddr.IPAddress(ip.strip()) for ip in set(all_ip)])])
-        # return list(set(all_emails)), return_ips, full, '', ''
-        all_hosts = [host.replace('www.', '') for host in all_hosts if host.replace('www.', '') in all_hosts]
-        all_hosts = list(sorted(set(all_hosts)))
-        return (
-            total_asns,
-            interesting_urls,
-            twitter_people_list_tracker,
-            linkedin_people_list_tracker,
-            linkedin_links_tracker,
-            all_urls,
-            all_ip,
-            all_emails,
-            all_hosts,
+    recorded_sources = {result.source.casefold() for result in stage_results}
+    for engine in engines:
+        if engine.casefold() not in recorded_sources:
+            stage_results.append(
+                StageResult(
+                    source=engine,
+                    source_family=source_families.get(engine, engine),
+                    status=SourceStatus.SKIPPED,
+                    duration_ms=0,
+                    result_count=0,
+                    error_type='SourceDidNotStart',
+                )
+            )
+    if 'dns-resolve' in selected_actions(args):
+        record_stage_result(
+            'action:dns-resolve',
+            dns_resolution_started,
+            dns_resolution_findings,
+            dns_resolution_errors[0] if dns_resolution_errors else None,
         )
     # Check to see if all_emails and all_hosts are defined.
     try:
@@ -1574,12 +1702,14 @@ async def start(rest_args: argparse.Namespace | None = None):
                     temp.add(host)
             full = list(sorted(temp))
             full.sort(key=lambda el: el.split(':')[0])
-            print('\n[*] Hosts found: ' + str(len(full)))
-            print('---------------------')
+            if completed_run_result is None:
+                print('\n[*] Hosts found: ' + str(len(full)))
+                print('---------------------')
             for host in full:
-                print(host)
+                if completed_run_result is None:
+                    print(host)
                 try:
-                    if ':' in host:
+                    if rest_args is None and ':' in host:
                         _, addr = host.split(':', 1)
                         await db.store(word, addr, 'ip', 'DNS-resolver')
                 except (OSError, RuntimeError, ValueError, TypeError) as e:
@@ -1588,19 +1718,25 @@ async def start(rest_args: argparse.Namespace | None = None):
         else:
             all_hosts = [host.replace('www.', '') for host in all_hosts if host.replace('www.', '') in all_hosts]
             all_hosts = list(sorted(set(all_hosts)))
-            print('\n[*] Hosts found: ' + str(len(all_hosts)))
-            print('---------------------')
-            for host in all_hosts:
-                print(host)
+            if completed_run_result is None:
+                print('\n[*] Hosts found: ' + str(len(all_hosts)))
+                print('---------------------')
+                for host in all_hosts:
+                    print(host)
 
     # DNS brute force
     if dnsbrute and dnsbrute[0] is True:
         print('\n[*] Starting DNS brute force.')
-        dns_force = dnssearch.DnsForce(word, final_dns_resolver_list, verbose=True)
-        resolved_pair, hosts, ips = await dns_force.run()
-        # Check if Rest API is being used if so return found hosts
-        if dnsbrute[1]:
-            return resolved_pair
+        stage_started = time.perf_counter()
+        try:
+            dns_force = dnssearch.DnsForce(word, final_dns_resolver_list, verbose=True)
+            resolved_pair, hosts, ips = await dns_force.run()
+            dns_brute_findings = [StageFinding(StageFindingKind.HOSTNAME, host) for host in resolved_pair]
+            record_stage_result('action:dns-brute', stage_started, dns_brute_findings)
+        except Exception as error:
+            resolved_pair, hosts, ips = [], [], []
+            record_stage_result('action:dns-brute', stage_started, error=error)
+            print(f'[!] DNS brute force failed: {error}')
         db = stash.StashManager()
         temp = set()
         for host in resolved_pair:
@@ -1629,20 +1765,12 @@ async def start(rest_args: argparse.Namespace | None = None):
             print(sub)
         await db.store_all(word, list(sorted(temp)), 'host', 'dns_bruteforce')
 
-    takeover_results = dict()
-    # TakeOver Checking
-    if takeover_status:
-        print('\n[*] Performing subdomain takeover check')
-        print('\n[*] Subdomain Takeover checking IS ACTIVE RECON')
-        search_take = takeover.TakeOver(all_hosts)
-        await search_take.populate_fingerprints()
-        await search_take.process(proxy=use_proxy)
-        takeover_results = await search_take.get_takeover_results()
     # DNS reverse lookup
     dnsrev: list = []
     # print(f'DNSlookup: {dnslookup}')
     if dnslookup is True:
         print('\n[*] Starting active queries for DNSLookup.')
+        stage_started = time.perf_counter()
 
         # reverse each iprange in a separate task
         __reverse_dns_tasks: dict = {}
@@ -1662,16 +1790,49 @@ async def start(rest_args: argparse.Namespace | None = None):
                 # nameservers=list(map(str, dnsserver.split(','))) if dnsserver else None))
 
         # run all the reversing tasks concurrently
-        await asyncio.gather(*__reverse_dns_tasks.values())
+        try:
+            await asyncio.gather(*__reverse_dns_tasks.values())
+            reverse_findings = [StageFinding(StageFindingKind.HOSTNAME, host) for host in dnsrev]
+            record_stage_result('action:dns-lookup', stage_started, reverse_findings)
+        except Exception as error:
+            record_stage_result('action:dns-lookup', stage_started, error=error)
+            print(f'[!] Reverse DNS lookup failed: {error}')
         print('\n[*] Hosts found after reverse lookup (in target domain):')
         print('--------------------------------------------------------')
         for xh in dnsrev:
             print(xh)
 
+    takeover_results = dict()
+    # TakeOver Checking
+    if takeover_status:
+        print('\n[*] Performing subdomain takeover check')
+        print('\n[*] Subdomain Takeover checking IS ACTIVE RECON')
+        stage_started = time.perf_counter()
+        try:
+            search_take = takeover.TakeOver(all_hosts)
+            await search_take.populate_fingerprints()
+            await search_take.process(proxy=use_proxy)
+            takeover_results = await search_take.get_takeover_results()
+            takeover_findings = [
+                StageFinding(
+                    StageFindingKind.TAKEOVER,
+                    str(host),
+                    result if isinstance(result, str) else ujson.dumps(result, sort_keys=True),
+                )
+                for host, result in takeover_results.items()
+            ]
+            record_stage_result('action:take-over', stage_started, takeover_findings)
+        except Exception as error:
+            record_stage_result('action:take-over', stage_started, error=error)
+            print(f'[!] Takeover check failed: {error}')
+
     # Screenshots
     screenshot_tups = []
-    if len(args.screenshot) > 0:
-        screen_shotter = ScreenShotter(args.screenshot)
+    screenshot_hosts: list[str] = []
+    screenshot_path = getattr(args, 'screenshot', '')
+    if len(screenshot_path) > 0:
+        stage_started = time.perf_counter()
+        screen_shotter = ScreenShotter(screenshot_path)
         path_exists = screen_shotter.verify_path()
         # Verify the path exists, if not create it or if user does not create it skips screenshot
         if path_exists:
@@ -1693,6 +1854,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                     results = await pool.map(screen_shotter.visit, list(unique_resolved_domains))
                     # Filter out domains that we couldn't connect to
                     unique_resolved_domains_list = list(sorted({tup[0] for tup in results if len(tup[1]) > 0}))
+                    screenshot_hosts.extend(unique_resolved_domains_list)
                 async with Pool(3) as pool:
                     print(f'Length of unique resolved domains: {len(unique_resolved_domains_list)} chunking now!\n')
                     # If you have the resources, you could make the function faster by increasing the chunk number
@@ -1710,10 +1872,18 @@ async def start(rest_args: argparse.Namespace | None = None):
             total_time = f'{mon:02d}:{sec:02d}'
             print(f'Finished taking screenshots in {total_time} seconds')
             print('[+] Note there may be leftover chrome processes you may have to kill manually\n')
+        record_stage_result(
+            'action:screenshot',
+            stage_started,
+            [StageFinding(StageFindingKind.SCREENSHOT, host) for host in screenshot_hosts],
+        )
 
     # Shodan
     shodanres = []
+    shodan_findings: list[StageFinding] = []
+    shodan_errors: list[Exception] = []
     if shodan is True:
+        stage_started = time.perf_counter()
         print('[*] Searching Shodan. ')
         try:
             for ip in host_ip:
@@ -1738,15 +1908,170 @@ async def start(rest_args: argparse.Namespace | None = None):
                                 value = ', '.join(map(str, value))
                             rowdata.append(value)
                         shodanres.append(rowdata)
+                        shodan_findings.append(
+                            StageFinding(
+                                StageFindingKind.SHODAN_RESULT,
+                                ip,
+                                ujson.dumps(shodandict[ip], sort_keys=True),
+                            )
+                        )
                         print(ujson.dumps(shodandict[ip], indent=4, sort_keys=True))
                         print('\n')
                 except Exception as ip_error:
+                    shodan_errors.append(ip_error)
                     print(f'[SHODAN-error] Error searching {ip}: {ip_error}')
                     continue
         except Exception as e:
+            shodan_errors.append(e)
             print(f'[!] An error occurred with Shodan: {e} ')
+        record_stage_result(
+            'action:shodan',
+            stage_started,
+            shodan_findings,
+            shodan_errors[0] if shodan_errors else None,
+        )
     else:
         pass
+
+    # Explicit API work must finish before the evidence run is completed or reported.
+    if args.api_scan or 'api_endpoints' in engines:
+        stage_started = time.perf_counter()
+        try:
+            wordlist = args.wordlist or str(DATA_DIR / 'wordlists' / 'api_endpoints.txt')
+
+            if not await anyio.Path(wordlist).exists():
+                print(f'\n[!] Wordlist not found: {wordlist}')
+                print('Creating a basic API wordlist for scanning...')
+                basic_endpoints = [
+                    '/api',
+                    '/api/v1',
+                    '/api/v2',
+                    '/api/v3',
+                    '/graphql',
+                    '/swagger',
+                    '/docs',
+                    '/redoc',
+                    '/swagger-ui',
+                    '/openapi.json',
+                    '/api-docs',
+                    '/rest',
+                    '/ws',
+                    '/swagger-ui.html',
+                    '/health',
+                    '/status',
+                    '/metrics',
+                    '/actuator',
+                    '/debug',
+                ]
+                temp_wordlist = str(DATA_DIR / 'wordlists' / 'temp_api_endpoints.txt')
+                async with await anyio.open_file(temp_wordlist, 'w') as f:
+                    await f.write('\n'.join(basic_endpoints))
+                wordlist = temp_wordlist
+                print(f'Basic API wordlist created with {len(basic_endpoints)} endpoints.')
+
+            print(f'\n[*] Starting API endpoint scanning with wordlist: {wordlist}')
+            api_scanner = api_endpoints.SearchApiEndpoints(word=args.domain, wordlist=wordlist)
+            await api_scanner.do_search()
+
+            endpoints_found = api_scanner.get_found_endpoints()
+            print(f'\n[*] API Endpoints found: {len(endpoints_found)}')
+            for endpoint in endpoints_found:
+                print(f'    - {endpoint}')
+            api_findings = [
+                StageFinding(StageFindingKind.API_ENDPOINT, endpoint, str(result.status_code))
+                for endpoint, result in endpoints_found.items()
+            ]
+
+            interesting_endpoints = api_scanner.get_interesting_endpoints()
+            print(f'\n[*] Interesting endpoints (200, 201, 202): {len(interesting_endpoints)}')
+            for endpoint in interesting_endpoints:
+                print(f'    - {endpoint}')
+
+            auth_required = api_scanner.get_auth_required()
+            print(f'\n[*] Endpoints requiring authentication: {len(auth_required)}')
+            for endpoint in auth_required:
+                print(f'    - {endpoint}')
+
+            api_versions = api_scanner.get_api_versions()
+            print(f'\n[*] Detected API versions: {len(api_versions)}')
+            for version in api_versions:
+                print(f'    - {version}')
+
+            rate_limits = api_scanner.get_rate_limits()
+            print(f'\n[*] Rate limited endpoints: {len(rate_limits)}')
+            for endpoint, info in rate_limits.items():
+                print(f'    - {endpoint} ({info.method})')
+
+            methods = api_scanner.get_methods()
+            print(f'\n[*] HTTP methods used: {", ".join(methods)}')
+
+            status_codes = api_scanner.get_status_codes()
+            print(f'\n[*] HTTP status codes encountered: {", ".join(map(str, status_codes))}')
+
+            db = stash.StashManager()
+            await db.store_all(word, endpoints_found, 'api_endpoint', 'api_scan')
+
+            if interesting_endpoints:
+                new_urls = [f'https://{args.domain}{endpoint}' for endpoint in interesting_endpoints]
+                interesting_urls.extend(new_urls)
+                all_urls.extend(new_urls)
+
+            record_stage_result('action:api-scan', stage_started, api_findings)
+            print('\n[+] API scanning completed successfully.')
+        except MissingKey as error:
+            record_stage_result('action:api-scan', stage_started, error=SourceSkippedError(str(error)))
+            print('\n[!] API endpoint scanning requires a wordlist. Use -w to specify a wordlist file.')
+            print('    Creating a basic wordlist and trying again...')
+        except Exception as e:
+            record_stage_result('action:api-scan', stage_started, error=e)
+            print(f'\n[!] An exception has occurred in API Endpoints scanning: {e}')
+            print('    Continuing with the rest of the scan...')
+            traceback.print_exc()
+
+    recorded_stages = {result.source.casefold() for result in stage_results}
+    for action in selected_actions(args):
+        stage_source = f'action:{action}'
+        if stage_source.casefold() not in recorded_stages:
+            stage_results.append(
+                StageResult(
+                    source=stage_source,
+                    status=SourceStatus.SKIPPED,
+                    duration_ms=0,
+                    result_count=0,
+                    error_type='StageDidNotStart',
+                )
+            )
+
+    completed_run_result = complete_run(completed_run_result, stage_results)
+    if len(final_dns_resolver_list) == 3:
+        try:
+            resolver_vantages: list[AioDNSResolverVantage] = []
+            async with AsyncExitStack() as resolver_stack:
+                for nameserver in final_dns_resolver_list:
+                    resolver = AioDNSResolverVantage(nameserver)
+                    resolver_vantages.append(resolver)
+                    resolver_stack.push_async_callback(resolver.close)
+                completed_run_result = await validate_unvalidated_entities(
+                    completed_run_result,
+                    resolver_vantages,
+                )
+        except Exception as error:
+            completed_run_result = replace(
+                completed_run_result,
+                source_executions=tuple(
+                    replace(
+                        execution,
+                        status=SourceStatus.FAILED,
+                        error_type=type(error).__name__,
+                    )
+                    if execution.source == 'action:dns-resolve'
+                    else execution
+                    for execution in completed_run_result.source_executions
+                ),
+            )
+            print(f'[!] DNS validation failed: {error}')
+    await SQLiteRunStore().save(completed_run_result)
+    print(format_run_terminal(completed_run_result))
 
     if filename != '':
         print('\n[*] Reporting started.')
@@ -1778,6 +2103,8 @@ async def start(rest_args: argparse.Namespace | None = None):
                         )
                     else:
                         await file.write(f'<vhost>{sanitize_for_xml(host)}</vhost>')
+                if completed_run_result is not None:
+                    await file.write(evidence_xml_fragment(completed_run_result))
                 # TODO add Shodan output into XML report
                 await file.write('</theHarvester>')
                 print('[*] XML File saved.')
@@ -1835,121 +2162,24 @@ async def start(rest_args: argparse.Namespace | None = None):
                 json_dict['takeover_results'] = takeover_results
 
             json_dict['shodan'] = shodanres
+            if completed_run_result is not None:
+                json_dict = legacy_json_result(completed_run_result, json_dict)
             async with await anyio.open_file(filename, 'w+') as fp:
                 dumped_json = ujson.dumps(json_dict, sort_keys=True)
                 await fp.write(dumped_json)
             print('[*] JSON File saved.')
+            if completed_run_result is not None:
+                jsonl_filename = filename.rsplit('.', 1)[0] + '.jsonl'
+                async with await anyio.open_file(jsonl_filename, 'w+') as fp:
+                    await fp.write(run_result_jsonl(completed_run_result) + '\n')
+                print('[*] JSONL File saved.')
         except (OSError, ValueError, TypeError, UnicodeEncodeError) as er:
             print(f'[!] An error occurred while saving the JSON file: {er} ')
         print('\n\n')
 
-    # Enhanced code block for API Endpoint scanning feature
-    if args.api_scan or 'api_endpoints' in engines:
-        try:
-            # Define a default wordlist if none is specified
-            wordlist = args.wordlist or str(DATA_DIR / 'wordlists' / 'api_endpoints.txt')
-
-            if not await anyio.Path(wordlist).exists():
-                print(f'\n[!] Wordlist not found: {wordlist}')
-                print('Creating a basic API wordlist for scanning...')
-                # Create a default simple API endpoint list
-                basic_endpoints = [
-                    '/api',
-                    '/api/v1',
-                    '/api/v2',
-                    '/api/v3',
-                    '/graphql',
-                    '/swagger',
-                    '/docs',
-                    '/redoc',
-                    '/swagger-ui',
-                    '/openapi.json',
-                    '/api-docs',
-                    '/rest',
-                    '/ws',
-                    '/swagger-ui.html',
-                    '/health',
-                    '/status',
-                    '/metrics',
-                    '/actuator',
-                    '/debug',
-                ]
-                temp_wordlist = str(DATA_DIR / 'wordlists' / 'temp_api_endpoints.txt')
-                async with await anyio.open_file(temp_wordlist, 'w') as f:
-                    await f.write('\n'.join(basic_endpoints))
-                wordlist = temp_wordlist
-                print(f'Basic API wordlist created with {len(basic_endpoints)} endpoints.')
-
-            print(f'\n[*] Starting API endpoint scanning with wordlist: {wordlist}')
-            api_scanner = api_endpoints.SearchApiEndpoints(word=args.domain, wordlist=wordlist)
-            await api_scanner.do_search()
-
-            # Print results
-            endpoints_found = api_scanner.get_found_endpoints()
-            print(f'\n[*] API Endpoints found: {len(endpoints_found)}')
-            for endpoint in endpoints_found:
-                print(f'    - {endpoint}')
-
-            interesting_endpoints = api_scanner.get_interesting_endpoints()
-            print(f'\n[*] Interesting endpoints (200, 201, 202): {len(interesting_endpoints)}')
-            for endpoint in interesting_endpoints:
-                print(f'    - {endpoint}')
-
-            auth_required = api_scanner.get_auth_required()
-            print(f'\n[*] Endpoints requiring authentication: {len(auth_required)}')
-            for endpoint in auth_required:
-                print(f'    - {endpoint}')
-
-            api_versions = api_scanner.get_api_versions()
-            print(f'\n[*] Detected API versions: {len(api_versions)}')
-            for version in api_versions:
-                print(f'    - {version}')
-
-            rate_limits = api_scanner.get_rate_limits()
-            print(f'\n[*] Rate limited endpoints: {len(rate_limits)}')
-            for endpoint, info in rate_limits.items():
-                print(f'    - {endpoint} ({info.method})')
-
-            methods = api_scanner.get_methods()
-            print(f'\n[*] HTTP methods used: {", ".join(methods)}')
-
-            status_codes = api_scanner.get_status_codes()
-            print(f'\n[*] HTTP status codes encountered: {", ".join(map(str, status_codes))}')
-
-            # Add results to storage
-            db = stash.StashManager()
-            await db.store_all(word, endpoints_found, 'api_endpoint', 'api_scan')
-
-            # Use custom database function if available
-            try:
-                # Try to use the storage module if available
-                db_storage = stash.StashManager()
-                await db_storage.store_all(word, endpoints_found, 'api_endpoint', 'api_scan')
-            except AttributeError:
-                print('\n[*] No custom database functions found')
-
-            # Add to interesting URLs if any endpoints were found
-            if interesting_endpoints:
-                new_urls = [f'https://{args.domain}{endpoint}' for endpoint in interesting_endpoints]
-                interesting_urls.extend(new_urls)
-
-                # Also add complete domain paths to the interesting_urls list
-                all_urls.extend(new_urls)
-
-            print('\n[+] API scanning completed successfully.')
-
-        except MissingKey:
-            print('\n[!] API endpoint scanning requires a wordlist. Use -w to specify a wordlist file.')
-            print('    Creating a basic wordlist and trying again...')
-            # The wordlist creation code above could be used here
-        except Exception as e:
-            print(f'\n[!] An exception has occurred in API Endpoints scanning: {e}')
-            print('    Continuing with the rest of the scan...')
-            traceback.print_exc()  # More detailed error information for developers
-
     if rest_args is not None:
         all_hosts = sorted({host.replace('www.', '') for host in all_hosts})
-        return (
+        response = (
             total_asns,
             interesting_urls,
             twitter_people_list_tracker,
@@ -1960,6 +2190,7 @@ async def start(rest_args: argparse.Namespace | None = None):
             all_emails,
             all_hosts,
         )
+        return (*response, completed_run_result) if return_evidence_run else response
     sys.exit(0)
 
 
