@@ -43,7 +43,7 @@ class SearchDymo:
         response = await AsyncFetcher.post_fetch(
             self.VERIFY_URL,
             headers=self._headers(),
-            data=payload,
+            json_body=payload,
             json=True,
             proxy=self.proxy,
         )

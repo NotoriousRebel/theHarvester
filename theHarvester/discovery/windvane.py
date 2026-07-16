@@ -92,7 +92,7 @@ class SearchWindvane:
                 data = {'domain': self.word, 'page_request': {'page': page, 'count': 30}}
 
                 try:
-                    response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
+                    response = await AsyncFetcher.post_fetch(url, headers=headers, json_body=data, proxy=self.proxy)
                     if response:
                         response_data = self._safe_parse_json(response)
 
@@ -132,7 +132,7 @@ class SearchWindvane:
                 data = {'domain': self.word, 'page_request': {'page': page, 'count': 30}}
 
                 try:
-                    response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
+                    response = await AsyncFetcher.post_fetch(url, headers=headers, json_body=data, proxy=self.proxy)
                     if response:
                         response_data = self._safe_parse_json(response)
 
@@ -174,7 +174,7 @@ class SearchWindvane:
             data = {'email': self.word, 'page_request': {'page': 1, 'count': 50}}
 
             try:
-                response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
+                response = await AsyncFetcher.post_fetch(url, headers=headers, json_body=data, proxy=self.proxy)
                 if response:
                     response_data = self._safe_parse_json(response)
 
@@ -215,7 +215,7 @@ class SearchWindvane:
             }
 
             try:
-                response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
+                response = await AsyncFetcher.post_fetch(url, headers=headers, json_body=data, proxy=self.proxy)
                 if response:
                     response_data = self._safe_parse_json(response)
 
