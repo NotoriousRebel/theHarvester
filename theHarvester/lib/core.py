@@ -4,8 +4,9 @@ import asyncio
 import contextlib
 import random
 import ssl
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import aiohttp
 import certifi
@@ -26,6 +27,23 @@ CONFIG_DIRS = [
     Path('/etc/theHarvester/'),
     Path('/usr/local/etc/theHarvester/'),
 ]
+
+_NO_BODY = object()
+
+
+@dataclass(frozen=True)
+class _RequestPlan:
+    method: str
+    url: str
+    headers: dict[str, str]
+    client_timeout: aiohttp.ClientTimeout | None
+    proxy_url: str | None
+    proxy_type: str | None
+    ssl_context: ssl.SSLContext | bool | None
+    request_kwargs: dict[str, Any]
+    response_json: bool
+    response_delay: int
+    request_timeout: int | None
 
 
 class Core:
@@ -446,6 +464,66 @@ class AsyncFetcher:
         return None, None
 
     @classmethod
+    def _plan_request(
+        cls,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: Sized = '',
+        response_json: bool = False,
+        proxy: str | bool | None = '',
+        verify: bool | None = None,
+        follow_redirects: bool | None = None,
+        request_timeout: int | None = None,
+        data: str | dict[str, Any] | object = _NO_BODY,
+        json_body: dict[str, Any] | None = None,
+    ) -> _RequestPlan:
+        has_body = data is not _NO_BODY
+        proxy_url, proxy_type = cls._resolve_proxy(proxy)
+        request_kwargs: dict[str, Any] = {}
+
+        if has_body:
+            client_timeout = cls._request_timeout(720)
+            ssl_context = cls._ssl_context() if proxy or params != '' else None
+            request_kwargs.update(
+                {'json': json_body}
+                if json_body is not None
+                else {'data': cls._normalize_data(cast('str | dict[str, Any]', data))}
+            )
+            if not proxy and params != '':
+                request_kwargs['ssl'] = ssl_context
+            response_delay = 5 if proxy else 3
+            planned_request_timeout = None
+        else:
+            client_timeout = cls._request_timeout(request_timeout)
+            ssl_context = cls._ssl_context(verify)
+            request_kwargs['ssl'] = ssl_context
+            if follow_redirects is not None:
+                request_kwargs['allow_redirects'] = follow_redirects
+            response_delay = 5
+            planned_request_timeout = request_timeout
+
+        if params != '':
+            request_kwargs['params'] = params
+        if proxy_url and proxy_type == 'http':
+            request_kwargs['proxy'] = proxy_url
+
+        return _RequestPlan(
+            method=method.upper(),
+            url=url,
+            headers=cls._default_headers(headers),
+            client_timeout=client_timeout,
+            proxy_url=proxy_url,
+            proxy_type=proxy_type,
+            ssl_context=ssl_context,
+            request_kwargs=request_kwargs,
+            response_json=response_json,
+            response_delay=response_delay,
+            request_timeout=planned_request_timeout,
+        )
+
+    @classmethod
     async def _build_session(
         cls,
         headers: dict[str, str],
@@ -468,21 +546,42 @@ class AsyncFetcher:
     async def _request(
         cls,
         session: aiohttp.ClientSession,
-        method: str,
-        url: str,
-        *,
-        response_json: bool = False,
-        delay: int = 5,
-        request_timeout: int | None = None,
-        **request_kwargs: Any,
+        plan: _RequestPlan,
     ) -> Any:
-        if request_timeout:
-            async with asyncio.timeout(request_timeout):
-                async with session.request(method.upper(), url, **request_kwargs) as response:
-                    return await cls._read_response(response, json=response_json, delay=delay)
+        if plan.request_timeout:
+            async with asyncio.timeout(plan.request_timeout):
+                async with session.request(plan.method, plan.url, **plan.request_kwargs) as response:
+                    return await cls._read_response(
+                        response,
+                        json=plan.response_json,
+                        delay=plan.response_delay,
+                    )
 
-        async with session.request(method.upper(), url, **request_kwargs) as response:
-            return await cls._read_response(response, json=response_json, delay=delay)
+        async with session.request(plan.method, plan.url, **plan.request_kwargs) as response:
+            return await cls._read_response(response, json=plan.response_json, delay=plan.response_delay)
+
+    @classmethod
+    async def _execute_request(
+        cls,
+        plan: _RequestPlan,
+        session: aiohttp.ClientSession | None = None,
+    ) -> Any:
+        owns_session = session is None
+        if owns_session:
+            session = await cls._build_session(
+                plan.headers,
+                plan.client_timeout,
+                plan.proxy_url,
+                plan.proxy_type,
+                plan.ssl_context,
+            )
+        assert session is not None
+
+        try:
+            return await cls._request(session, plan)
+        finally:
+            if owns_session:
+                await session.close()
 
     @staticmethod
     def _get_random_proxy(proxy_dict: dict) -> tuple[str | None, str | None]:
@@ -527,50 +626,20 @@ class AsyncFetcher:
         proxy: bool = False,
         json_body: dict[str, Any] | None = None,
     ):
-        headers = cls._default_headers(headers)
-        timeout = cls._request_timeout(720)
         # By default, timeout is 5 minutes, changed to 12-minutes
         # results are well worth the wait
         try:
-            request_kwargs: dict[str, Any] = {'json': json_body} if json_body is not None else {'data': cls._normalize_data(data)}
-            if proxy:
-                proxy_url, proxy_type = cls._resolve_proxy(proxy)
-                sslcontext = cls._ssl_context()
-                if params != '':
-                    request_kwargs['params'] = params
-                if proxy_type == 'http':
-                    request_kwargs['proxy'] = proxy_url
-                async with await cls._build_session(headers, timeout, proxy_url, proxy_type, sslcontext) as session:
-                    return await cls._request(
-                        session,
-                        'POST',
-                        url,
-                        response_json=json,
-                        delay=5,
-                        **request_kwargs,
-                    )
-            elif params == '':
-                async with await cls._build_session(headers, timeout) as session:
-                    return await cls._request(
-                        session,
-                        'POST',
-                        url,
-                        response_json=json,
-                        delay=3,
-                        **request_kwargs,
-                    )
-            else:
-                async with await cls._build_session(headers, timeout) as session:
-                    return await cls._request(
-                        session,
-                        'POST',
-                        url,
-                        ssl=cls._ssl_context(),
-                        params=params,
-                        response_json=json,
-                        delay=3,
-                        **request_kwargs,
-                    )
+            plan = cls._plan_request(
+                'POST',
+                url,
+                headers=headers,
+                params=params,
+                response_json=json,
+                proxy=proxy,
+                data=data,
+                json_body=json_body,
+            )
+            return await cls._execute_request(plan)
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
             return ''
 
@@ -594,45 +663,18 @@ class AsyncFetcher:
         - Returns response text or json depending on `json` flag.
         """
         try:
-            ssl_arg = cls._ssl_context(verify)
-            proxy_url, proxy_type = cls._resolve_proxy(proxy)
-            client_timeout = cls._request_timeout(request_timeout)
-            req_headers = cls._default_headers(headers)
-
-            # Decide whether we need to manage the session
-            owns_session = session is None
-            if owns_session:
-                # Create connector based on proxy type
-                session = (
-                    await cls._build_session(req_headers, client_timeout, proxy_url, proxy_type, ssl_arg)
-                    if proxy_url
-                    else await cls._build_session(req_headers, client_timeout)
-                )
-            assert session is not None
-
-            try:
-                request_kwargs: dict[str, Any] = {
-                    'ssl': ssl_arg,
-                }
-                # For HTTP proxies, pass the proxy parameter; for SOCKS5, the connector handles it
-                if proxy_url and proxy_type == 'http':
-                    request_kwargs['proxy'] = proxy_url
-                if follow_redirects is not None:
-                    request_kwargs['allow_redirects'] = follow_redirects
-                if params != '':
-                    request_kwargs['params'] = params
-                return await cls._request(
-                    session,
-                    method,
-                    url,
-                    response_json=json,
-                    delay=5,
-                    request_timeout=request_timeout,
-                    **request_kwargs,
-                )
-            finally:
-                if owns_session:
-                    await session.close()
+            plan = cls._plan_request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                response_json=json,
+                proxy=proxy,
+                verify=verify,
+                follow_redirects=follow_redirects,
+                request_timeout=request_timeout,
+            )
+            return await cls._execute_request(plan, session)
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
             return ''
 
