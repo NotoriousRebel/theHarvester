@@ -377,9 +377,11 @@ class AsyncFetcher:
         return headers or {'User-Agent': Core.get_user_agent()}
 
     @staticmethod
-    def _ssl_context(verify: bool | None = True) -> ssl.SSLContext | bool:
+    def _ssl_context(verify: bool | None = True, use_system_ssl: bool = False) -> ssl.SSLContext | bool:
         if verify is False:
             return False
+        if use_system_ssl:
+            return True
         return ssl.create_default_context(cafile=certifi.where())
 
     @staticmethod
@@ -421,6 +423,8 @@ class AsyncFetcher:
         request_timeout: int | None = None,
         data: str | dict[str, Any] | object = _NO_BODY,
         json_body: dict[str, Any] | None = None,
+        response_delay: int | None = None,
+        use_system_ssl: bool = False,
     ) -> _RequestPlan:
         has_body = data is not _NO_BODY
         proxy_url, proxy_type = cls._resolve_proxy(proxy)
@@ -436,15 +440,15 @@ class AsyncFetcher:
             )
             if not proxy and params != '':
                 request_kwargs['ssl'] = ssl_context
-            response_delay = 5 if proxy else 3
+            default_response_delay = 5 if proxy else 3
             planned_request_timeout = None
         else:
             client_timeout = cls._request_timeout(request_timeout)
-            ssl_context = cls._ssl_context(verify)
+            ssl_context = cls._ssl_context(verify, use_system_ssl)
             request_kwargs['ssl'] = ssl_context
             if follow_redirects is not None:
                 request_kwargs['allow_redirects'] = follow_redirects
-            response_delay = 5
+            default_response_delay = 5
             planned_request_timeout = request_timeout
 
         if params != '':
@@ -462,7 +466,7 @@ class AsyncFetcher:
             ssl_context=ssl_context,
             request_kwargs=request_kwargs,
             response_json=response_json,
-            response_delay=response_delay,
+            response_delay=default_response_delay if response_delay is None else response_delay,
             request_timeout=planned_request_timeout,
         )
 
@@ -568,6 +572,8 @@ class AsyncFetcher:
         json: bool = False,
         proxy: bool = False,
         json_body: dict[str, Any] | None = None,
+        *,
+        response_delay: int | None = None,
     ):
         # By default, timeout is 5 minutes, changed to 12-minutes
         # results are well worth the wait
@@ -581,6 +587,7 @@ class AsyncFetcher:
                 proxy=proxy,
                 data=data,
                 json_body=json_body,
+                response_delay=response_delay,
             )
             return await cls._execute_request(plan)
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
@@ -599,12 +606,17 @@ class AsyncFetcher:
         verify: bool | None = None,
         follow_redirects: bool | None = None,
         request_timeout: int | None = None,
+        *,
+        response_delay: int | None = None,
+        use_system_ssl: bool = False,
     ) -> Any:
         """Generic HTTP request helper.
         - If a session is not provided, one will be created and closed automatically.
         - Supports optional headers, method selection, proxy, ssl verification, redirects and timeout.
         - Returns response text or json depending on `json` flag.
         """
+        if use_system_ssl and verify is False:
+            raise ValueError('use_system_ssl cannot be combined with verify=False')
         try:
             plan = cls._plan_request(
                 method,
@@ -616,6 +628,8 @@ class AsyncFetcher:
                 verify=verify,
                 follow_redirects=follow_redirects,
                 request_timeout=request_timeout,
+                response_delay=response_delay,
+                use_system_ssl=use_system_ssl,
             )
             return await cls._execute_request(plan, session)
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
