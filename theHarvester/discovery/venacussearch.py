@@ -1,9 +1,7 @@
 from typing import Any
 
-import aiohttp
-
 from theHarvester.discovery.constants import MissingKey
-from theHarvester.lib.core import Core
+from theHarvester.lib.core import AsyncFetcher, Core
 from theHarvester.parsers import venacusparser
 
 
@@ -33,35 +31,40 @@ class SearchVenacus:
                 'User-Agent': f'{Core.get_user_agent()}-theHarvester',
             }
 
-            async with aiohttp.ClientSession() as session:
-                while self.more and result_count < self.limit:
-                    query = {
-                        'q': self.word,
-                        'offset_doc': self.offset_doc,
-                        'offset_in_doc': self.offset_in_doc,
-                        'limit': 100,
-                        'ai': 'true' if self.ai else 'false',
-                    }
+            while self.more and result_count < self.limit:
+                query = {
+                    'q': self.word,
+                    'offset_doc': self.offset_doc,
+                    'offset_in_doc': self.offset_in_doc,
+                    'limit': 100,
+                    'ai': 'true' if self.ai else 'false',
+                }
 
-                    async with session.get(f'{self.base_url}/v1/search/', headers=headers, params=query) as total_resp:
-                        search_data = await total_resp.json()
-                        current_results = search_data.get('data', [])
+                search_data = await AsyncFetcher.fetch(
+                    url=f'{self.base_url}/v1/search/',
+                    headers=headers,
+                    params=query,
+                    json=True,
+                    response_delay=0,
+                    use_system_ssl=True,
+                )
+                current_results = search_data.get('data', [])
 
-                        if not current_results:
-                            print('No more results found.')
-                            break
+                if not current_results:
+                    print('No more results found.')
+                    break
 
-                        total_results.extend(current_results)
-                        result_count += len(current_results)
+                total_results.extend(current_results)
+                result_count += len(current_results)
 
-                        self.offset_doc = search_data.get('offset_doc', 0)
-                        self.offset_in_doc = search_data.get('offset_in_doc', 0)
+                self.offset_doc = search_data.get('offset_doc', 0)
+                self.offset_in_doc = search_data.get('offset_in_doc', 0)
 
-                        self.more = search_data.get('more', False)
+                self.more = search_data.get('more', False)
 
-                self.results = total_results
-                if not self.results:
-                    print('No results found.')
+            self.results = total_results
+            if not self.results:
+                print('No results found.')
 
         except Exception as e:
             print(f'An exception has occurred in Venacus: {e}')
