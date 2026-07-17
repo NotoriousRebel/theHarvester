@@ -1,8 +1,7 @@
 # Direct HTTP migration gaps
 
-No discovery source that creates `aiohttp.ClientSession` directly can preserve its current behavior through the public
-`AsyncFetcher` contract yet. `fetch` has no controls for the existing sources' zero response delay or aiohttp's
-system-default TLS trust roots. The POST candidates have additional gaps listed below.
+Venacus now uses the public `AsyncFetcher` contract with explicit zero-delay and system-default TLS controls. The
+remaining discovery sources that create `aiohttp.ClientSession` directly still need the capabilities listed below.
 
 | Source | Capability needed before migration |
 | --- | --- |
@@ -16,4 +15,3 @@ system-default TLS trust roots. The POST candidates have additional gaps listed 
 | `securityscorecard.py` | Response status so only a `200` JSON body is processed. |
 | `sherlockeye.py` | Response status, configurable POST timeout, explicit proxy URL, and error text. |
 | `thc.py` | Response status and rate-limit headers for bounded retry behavior. |
-| `venacussearch.py` | Zero-delay paginated requests and aiohttp's system-default TLS trust roots. |
