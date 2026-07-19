@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -140,7 +141,7 @@ async def test_process_stops_when_the_provider_repeats_a_cursor(monkeypatch: pyt
 
 @pytest.mark.asyncio
 async def test_process_reports_incomplete_results_at_the_request_safety_limit(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(certspottersearch.SearchCertspoter, 'MAX_PAGES', 2)
     requested_urls: list[str] = []
@@ -153,8 +154,9 @@ async def test_process_reports_incomplete_results_at_the_request_safety_limit(
     monkeypatch.setattr(certspottersearch.AsyncFetcher, 'fetch_all', fake_fetch_all)
 
     search = certspottersearch.SearchCertspoter('example.com')
-    await search.process()
+    with caplog.at_level(logging.WARNING, logger=certspottersearch.__name__):
+        await search.process()
 
     assert await search.get_hostnames() == {'page-1.example.com', 'page-2.example.com'}
     assert len(requested_urls) == 2
-    assert 'results may be incomplete' in capsys.readouterr().out
+    assert 'results may be incomplete' in caplog.text
