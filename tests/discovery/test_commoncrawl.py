@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -98,7 +99,7 @@ async def test_process_uses_unique_indexes_from_latest_catalog_year_window_and_s
 @pytest.mark.asyncio
 @pytest.mark.parametrize('broken_payload', ['not-json', ''])
 async def test_process_reports_failed_or_malformed_index_without_discarding_other_results(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], broken_payload: str
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken_payload: str
 ) -> None:
     broken_endpoint = 'https://index.commoncrawl.org/CC-MAIN-2026-30-index'
     good_endpoint = 'https://index.commoncrawl.org/CC-MAIN-2026-26-index'
@@ -127,17 +128,17 @@ async def test_process_reports_failed_or_malformed_index_without_discarding_othe
     monkeypatch.setattr(commoncrawl.AsyncFetcher, 'fetch_all', fake_fetch_all)
 
     search = commoncrawl.SearchCommoncrawl('example.com')
-    await search.process()
+    with caplog.at_level(logging.WARNING, logger=commoncrawl.__name__):
+        await search.process()
 
     assert await search.get_hostnames() == {'survivor.example.com'}
-    output = capsys.readouterr().out
-    assert 'CC-MAIN-BROKEN' in output
-    assert 'CC-MAIN-2026-30' in output
+    assert 'CC-MAIN-BROKEN' in caplog.text
+    assert 'CC-MAIN-2026-30' in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_process_reports_non_json_upstream_response(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     catalog = [
         {
@@ -156,10 +157,13 @@ async def test_process_reports_non_json_upstream_response(
 
     monkeypatch.setattr(commoncrawl.AsyncFetcher, 'fetch_all', fake_fetch_all)
 
-    with pytest.raises(RuntimeError, match='all Common Crawl queries failed'):
+    with (
+        caplog.at_level(logging.WARNING, logger=commoncrawl.__name__),
+        pytest.raises(RuntimeError, match='all Common Crawl queries failed'),
+    ):
         await commoncrawl.SearchCommoncrawl('example.com').process()
 
-    assert 'unexpected non-JSON response' in capsys.readouterr().out
+    assert 'unexpected non-JSON response' in caplog.text
 
 
 @pytest.mark.asyncio
