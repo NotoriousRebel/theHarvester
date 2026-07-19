@@ -133,3 +133,58 @@ async def test_process_reports_failed_or_malformed_index_without_discarding_othe
     output = capsys.readouterr().out
     assert 'CC-MAIN-BROKEN' in output
     assert 'CC-MAIN-2026-30' in output
+
+
+@pytest.mark.asyncio
+async def test_process_reports_non_json_upstream_response(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = [
+        {
+            'id': 'CC-MAIN-2026-30',
+            'cdx-api': 'https://index.commoncrawl.org/CC-MAIN-2026-30-index',
+            'to': '2026-07-12T00:00:00',
+        }
+    ]
+
+    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[object]:
+        if urls == ['https://index.commoncrawl.org/collinfo.json']:
+            return [catalog]
+        if 'showNumPages=true' in urls[0]:
+            return ['{"pages": 1, "pageSize": 5, "blocks": 1}']
+        return ['<html><h1>504 Gateway Time-out</h1></html>']
+
+    monkeypatch.setattr(commoncrawl.AsyncFetcher, 'fetch_all', fake_fetch_all)
+
+    with pytest.raises(RuntimeError, match='all Common Crawl queries failed'):
+        await commoncrawl.SearchCommoncrawl('example.com').process()
+
+    assert 'unexpected non-JSON response' in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_process_keeps_results_when_another_query_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    catalog = [
+        {
+            'id': 'CC-MAIN-2026-30',
+            'cdx-api': 'https://index.commoncrawl.org/CC-MAIN-2026-30-index',
+            'to': '2026-07-12T00:00:00',
+        }
+    ]
+
+    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[object]:
+        if urls == ['https://index.commoncrawl.org/collinfo.json']:
+            return [catalog]
+        query = parse_qs(urlsplit(urls[0]).query)
+        if query.get('showNumPages') == ['true']:
+            return ['{"pages": 1, "pageSize": 5, "blocks": 1}']
+        if query['url'] == ['*.example.com']:
+            return ['{"url":"https://api.example.com/v1"}']
+        return ['<html><h1>504 Gateway Time-out</h1></html>']
+
+    monkeypatch.setattr(commoncrawl.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    search = commoncrawl.SearchCommoncrawl('example.com')
+
+    await search.process()
+
+    assert await search.get_hostnames() == {'api.example.com'}

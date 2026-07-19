@@ -34,6 +34,8 @@ class SearchCommoncrawl:
         results: list = []
         if not payload:
             return results
+        if payload.lstrip().startswith('<'):
+            raise ValueError('unexpected non-JSON response')
 
         for line in payload.strip().split('\n'):
             if line.strip():
@@ -97,10 +99,11 @@ class SearchCommoncrawl:
                 print('Common Crawl API error: index catalog contains no usable entries')
                 return
 
+            successful_queries = 0
             for index in indexes:
-                try:
-                    endpoint = index['cdx-api']
-                    for query in (f'*.{self.word}', f'{self.word}/*'):
+                endpoint = index['cdx-api']
+                for query in (f'*.{self.word}', f'{self.word}/*'):
+                    try:
                         count_url = f'{endpoint}?{urlencode({"url": query, "output": "json", "pageSize": self.PAGE_SIZE, "showNumPages": "true"})}'
                         count_response = await AsyncFetcher.fetch_all([count_url], headers=headers, proxy=self.proxy)
                         page_count = json.loads(count_response[0])['pages']
@@ -117,11 +120,15 @@ class SearchCommoncrawl:
                                     domain = self._extract_domain_from_url(record.get('url', ''))
                                     if domain.endswith(f'.{self.word}') or domain == self.word:
                                         self.totalhosts.add(domain)
+                        successful_queries += 1
+                    except Exception as e:
+                        print(f'Common Crawl API error for index {index.get("id", "unknown")}: {e}')
 
-                except Exception as e:
-                    print(f'Common Crawl API error for index {index.get("id", "unknown")}: {e}')
-                    continue
+            if not successful_queries:
+                raise RuntimeError('all Common Crawl queries failed')
 
+        except RuntimeError:
+            raise
         except Exception as e:
             print(f'Common Crawl API error: {e}')
 
