@@ -460,7 +460,8 @@ async def start(rest_args: argparse.Namespace | None = None):
                             )
                         )
                     except Exception as e:
-                        show_default_error_message(engineitem, word, error=e)
+                        if not isinstance(e, MissingKey) or not args.quiet:
+                            show_default_error_message(engineitem, word, error=e)
 
                 elif engineitem == 'bitbucket':
                     try:
@@ -475,7 +476,8 @@ async def start(rest_args: argparse.Namespace | None = None):
                         )
                     except Exception as ex:
                         if isinstance(ex, MissingKey):
-                            print(MissingKey('Bitbucket'))
+                            if not args.quiet:
+                                print(MissingKey('Bitbucket'))
                         else:
                             show_default_error_message(engineitem, word, ex)
 
@@ -513,8 +515,9 @@ async def start(rest_args: argparse.Namespace | None = None):
                         stor_lst.append(store(builtwith_search, engineitem, store_host=True, store_interestingurls=True))
                     except Exception as e:
                         if isinstance(e, MissingKey):
-                            print(f"Failed to perform BuiltWith search for word: '{word}'")
-                            print(f'A Missing Key Error occurred in builtwith: {e}')
+                            if not args.quiet:
+                                print(f"Failed to perform BuiltWith search for word: '{word}'")
+                                print(f'A Missing Key Error occurred in builtwith: {e}')
                         else:
                             show_default_error_message(engineitem, word, e)
 
