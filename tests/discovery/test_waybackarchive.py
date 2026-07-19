@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -94,7 +95,7 @@ async def test_process_normalizes_the_requested_domain(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_process_keeps_partial_results_when_a_later_page_times_out(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
         query = parse_qs(urlparse(urls[0]).query)
@@ -107,10 +108,11 @@ async def test_process_keeps_partial_results_when_a_later_page_times_out(
     monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
-    await search.process()
+    with caplog.at_level(logging.WARNING, logger=waybackarchive.__name__):
+        await search.process()
 
     assert await search.get_hostnames() == {'api.example.com', 'example.com'}
-    assert 'Wayback Archive API error for pattern *.example.com' in capsys.readouterr().out
+    assert 'Wayback Archive API error for pattern *.example.com' in caplog.text
 
 
 @pytest.mark.asyncio
