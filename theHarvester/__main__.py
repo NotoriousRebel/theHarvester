@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 from collections.abc import Awaitable
+from contextlib import AsyncExitStack
 from typing import Any
 
 import anyio
@@ -79,7 +80,7 @@ from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker, stash
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
 from theHarvester.lib.output import print_linkedin_sections, print_section, sorted_unique
-from theHarvester.lib.run import LegacyHostnameSource, execute_run, legacy_hostnames
+from theHarvester.lib.run import AioDNSResolverVantage, LegacyHostnameSource, execute_run, legacy_hostnames
 from theHarvester.lib.source_catalog import SourceSchedule, canonical_source_names, describe_activity, resolve_sources
 from theHarvester.screenshot.screenshot import ScreenShotter
 
@@ -320,8 +321,12 @@ async def start(rest_args: argparse.Namespace | None = None):
 
         # if for some reason, there are duplicates
         final_dns_resolver_list = list(set(final_dns_resolver_list))
-        if len(final_dns_resolver_list) == 0:
-            print('No valid DNS resolvers were parsed from --dns-resolve; continuing without custom resolvers.')
+    if dnsresolve != '' and len(final_dns_resolver_list) != 3:
+        resolver_error = ValueError('--dns-resolve requires exactly three distinct resolver vantages')
+        if rest_args is not None:
+            raise resolver_error
+        print(f'\n[!] {resolver_error}.\n')
+        sys.exit(1)
 
     engines: list = []
     # If the user specifies
@@ -389,7 +394,16 @@ async def start(rest_args: argparse.Namespace | None = None):
                 else await search_engine.process(process_param, use_proxy)
             )
         else:
-            run_result = await execute_run(word, evidence_source)
+            if len(final_dns_resolver_list) == 3:
+                resolver_vantages: list[AioDNSResolverVantage] = []
+                async with AsyncExitStack() as resolver_stack:
+                    for nameserver in final_dns_resolver_list:
+                        resolver = AioDNSResolverVantage(nameserver)
+                        resolver_vantages.append(resolver)
+                        resolver_stack.push_async_callback(resolver.close)
+                    run_result = await execute_run(word, evidence_source, resolver_vantages=resolver_vantages)
+            else:
+                run_result = await execute_run(word, evidence_source)
         db_stash = stash.StashManager()
 
         if source:
