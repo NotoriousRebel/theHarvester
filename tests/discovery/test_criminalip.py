@@ -58,6 +58,8 @@ async def test_do_search_uses_v2_report_endpoint(monkeypatch) -> None:
 
     async def fake_post_fetch(url, **kwargs):
         assert url == 'https://api.criminalip.io/v1/domain/scan'
+        assert kwargs['json_body'] == {'query': 'example.com'}
+        assert 'data' not in kwargs
         return {'status': 200, 'data': {'scan_id': 12345}}
 
     async def fake_fetch_all(urls, **kwargs):

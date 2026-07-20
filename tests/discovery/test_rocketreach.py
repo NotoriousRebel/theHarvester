@@ -1,5 +1,6 @@
 import sys
 import types
+from typing import Any
 
 import pytest
 
@@ -38,8 +39,17 @@ async def test_do_search_uses_people_data_endpoint_and_start_pagination(monkeypa
 
     calls = []
 
-    async def fake_post_fetch(url, headers=None, data=None, json=False, **kwargs):
-        calls.append((url, headers, data, json, kwargs))
+    async def fake_post_fetch(url: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append(
+            (
+                url,
+                kwargs.get('headers'),
+                kwargs.get('data'),
+                kwargs.get('json', False),
+                kwargs.get('json_body'),
+                kwargs,
+            )
+        )
         if len(calls) == 1:
             first_page_profiles = []
             for index in range(100):
@@ -73,16 +83,19 @@ async def test_do_search_uses_people_data_endpoint_and_start_pagination(monkeypa
     await search.process()
 
     assert len(calls) == 2
-    first_url, first_headers, first_data, first_json, _ = calls[0]
-    second_url, _, second_data, _, _ = calls[1]
+    first_url, first_headers, first_data, first_json, first_json_body, _ = calls[0]
+    second_url, _, second_data, _, second_json_body, _ = calls[1]
 
     assert first_url == 'https://api.rocketreach.co/api/v2/person/search'
     assert second_url == 'https://api.rocketreach.co/api/v2/person/search'
+    assert isinstance(first_headers, dict)
     assert first_headers['Api-Key'] == 'test-key'
     assert first_headers['User-Agent'] == 'test-agent'
     assert first_json is True
-    assert first_data == {'query': {'current_employer_domain': ['example.com']}, 'start': 0, 'page_size': 100}
-    assert second_data == {'query': {'current_employer_domain': ['example.com']}, 'start': 100, 'page_size': 50}
+    assert first_data is None
+    assert first_json_body == {'query': {'current_employer_domain': ['example.com']}, 'start': 0, 'page_size': 100}
+    assert second_data is None
+    assert second_json_body == {'query': {'current_employer_domain': ['example.com']}, 'start': 100, 'page_size': 50}
 
     links = await search.get_links()
     emails = await search.get_emails()

@@ -38,7 +38,7 @@ class SearchRocketReach:
                     'start': start,
                     'page_size': page_size,
                 }
-                result = await AsyncFetcher.post_fetch(self.baseurl, headers=headers, data=data, json=True)
+                result = await AsyncFetcher.post_fetch(self.baseurl, headers=headers, json_body=data, json=True)
                 if not isinstance(result, dict):
                     break
 

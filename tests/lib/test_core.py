@@ -6,6 +6,7 @@ from unittest import mock
 
 import pytest
 import yaml
+from aiohttp import web
 
 import theHarvester.lib.core as core_module
 from theHarvester.lib.core import CONFIG_DIRS, DATA_DIR, AsyncFetcher, Core
@@ -252,7 +253,88 @@ async def test_post_fetch_decodes_string_payload_and_posts_params(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_post_fetch_proxy_branch_uses_get_with_http_proxy(monkeypatch) -> None:
+async def test_post_fetch_sends_json_body_without_decoding_response(
+    monkeypatch: pytest.MonkeyPatch, unused_tcp_port: int
+) -> None:
+    received: dict[str, Any] = {}
+
+    async def capture_json(request: web.Request) -> web.Response:
+        received['method'] = request.method
+        received['content_type'] = request.content_type
+        received['json'] = await request.json()
+        return web.Response(text='accepted')
+
+    app = web.Application()
+    app.router.add_post('/', capture_json)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', unused_tcp_port)
+    await site.start()
+    monkeypatch.setattr(core_module.asyncio, 'sleep', fake_sleep)
+
+    try:
+        result = await AsyncFetcher.post_fetch(
+            f'http://127.0.0.1:{unused_tcp_port}/',
+            json_body={'query': 'example'},
+        )
+    finally:
+        await runner.cleanup()
+
+    assert result == 'accepted'
+    assert received == {
+        'method': 'POST',
+        'content_type': 'application/json',
+        'json': {'query': 'example'},
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_fetch_sends_raw_text_body(monkeypatch: pytest.MonkeyPatch, unused_tcp_port: int) -> None:
+    received: dict[str, str] = {}
+
+    async def capture_text(request: web.Request) -> web.Response:
+        received['method'] = request.method
+        received['body'] = await request.text()
+        return web.Response(text='accepted')
+
+    app = web.Application()
+    app.router.add_post('/', capture_text)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', unused_tcp_port)
+    await site.start()
+    monkeypatch.setattr(core_module.asyncio, 'sleep', fake_sleep)
+
+    try:
+        result = await AsyncFetcher.post_fetch(
+            f'http://127.0.0.1:{unused_tcp_port}/',
+            data='plain text',
+        )
+    finally:
+        await runner.cleanup()
+
+    assert result == 'accepted'
+    assert received == {'method': 'POST', 'body': 'plain text'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('post_kwargs', 'expected_request_kwargs', 'expected_result'),
+    [
+        (
+            {'json_body': {'query': 'example'}, 'json': True},
+            {'proxy': 'http://proxy.local:8080', 'json': {'query': 'example'}},
+            {'ok': True},
+        ),
+        ({}, {'proxy': 'http://proxy.local:8080', 'data': ''}, 'response-text'),
+    ],
+)
+async def test_post_fetch_proxy_preserves_post(
+    monkeypatch: pytest.MonkeyPatch,
+    post_kwargs: dict[str, Any],
+    expected_request_kwargs: dict[str, Any],
+    expected_result: Any,
+) -> None:
     reset_dummy_sessions()
     created_connectors = []
     monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
@@ -267,12 +349,16 @@ async def test_post_fetch_proxy_branch_uses_get_with_http_proxy(monkeypatch) -> 
 
     monkeypatch.setattr(AsyncFetcher, '_create_connector', fake_create_connector)
 
-    result = await AsyncFetcher.post_fetch('https://example.com/resource', proxy=True)
+    result = await AsyncFetcher.post_fetch('https://example.com/resource', proxy=True, **post_kwargs)
 
-    assert result == 'response-text'
+    assert result == expected_result
     assert created_connectors == [('http://proxy.local:8080', 'http', 'ssl-context')]
     session = DummySession.instances[0]
     assert session.connector == 'connector'
     assert session.requests == [
-        ('GET', 'https://example.com/resource', {'proxy': 'http://proxy.local:8080'})
+        (
+            'POST',
+            'https://example.com/resource',
+            expected_request_kwargs,
+        )
     ]

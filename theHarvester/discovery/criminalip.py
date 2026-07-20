@@ -87,14 +87,14 @@ class SearchCriminalIP:
         # https://www.criminalip.io/developer/api/get-domain-status-id
         # https://www.criminalip.io/developer/api/get-v2-domain-report-id
         url = 'https://api.criminalip.io/v1/domain/scan'
-        data = f'{{"query": "{self.word}"}}'
+        data = {'query': self.word}
         # print(f'Current key: {self.key}')
         user_agent = Core.get_user_agent()
         response = await AsyncFetcher.post_fetch(
             url,
             json=True,
             headers={'User-Agent': user_agent, 'x-api-key': f'{self.key}'},
-            data=data,
+            json_body=data,
             proxy=self.proxy,
         )
         # print(f'My response: {response}')
