@@ -7,7 +7,8 @@ import string
 import sys
 import time
 import traceback
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable
+from typing import Any
 
 import anyio
 import netaddr
@@ -79,10 +80,8 @@ from theHarvester.lib import hostchecker, stash
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
 from theHarvester.lib.output import print_linkedin_sections, print_section, sorted_unique
 from theHarvester.lib.run import LegacyHostnameSource, execute_run, legacy_hostnames
+from theHarvester.lib.source_catalog import SourceSchedule, canonical_source_names, describe_activity, resolve_sources
 from theHarvester.screenshot.screenshot import ScreenShotter
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 
 def sanitize_for_xml(text: str) -> str:
@@ -109,8 +108,7 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
-async def start(rest_args: argparse.Namespace | None = None):
-    """Main program function"""
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description='theHarvester is used to gather open source intelligence (OSINT) on a company or domain.'
     )
@@ -199,12 +197,31 @@ async def start(rest_args: argparse.Namespace | None = None):
     parser.add_argument(
         '-b',
         '--source',
-        help="""baidu, bevigil, bitbucket, brave, bufferoverun,
-                            builtwith, censys, certspotter, chaos, commoncrawl, criminalip, crtsh, dehashed, dnsdumpster, duckduckgo, dymo, fofa, fullhunt, github-code,
-                            gitlab, hackertarget, haveibeenpwned, hudsonrock, hunter, hunterhow, intelx, leakix, leaklookup, mojeek, netlas, onyphe, otx, pentesttools,
-                            projectdiscovery, rapiddns, robtex, rocketreach, securityscorecard, securityTrails, sherlockeye, shodan, shodanInternetDB, subdomaincenter,
-                            subdomainfinderc99, thc, threatcrowd, tomba, urlscan, venacus, virustotal, waybackarchive, whoisxml, windvane, yahoo, zoomeye""",
+        help=', '.join(canonical_source_names()),
     )
+    return parser
+
+
+def selected_actions(args: argparse.Namespace) -> tuple[str, ...]:
+    dns_resolve = getattr(args, 'dns_resolve', '')
+    return tuple(
+        name
+        for name, enabled in (
+            ('dns-brute', getattr(args, 'dns_brute', False)),
+            ('dns-lookup', getattr(args, 'dns_lookup', False)),
+            ('dns-resolve', dns_resolve is None or bool(dns_resolve)),
+            ('shodan', getattr(args, 'shodan', False)),
+            ('api-scan', getattr(args, 'api_scan', False)),
+            ('screenshot', bool(getattr(args, 'screenshot', ''))),
+            ('take-over', getattr(args, 'take_over', False)),
+        )
+        if enabled
+    )
+
+
+async def start(rest_args: argparse.Namespace | None = None):
+    """Main program function"""
+    parser = build_parser()
 
     # determines if the filename is coming from rest api or user
     rest_filename = ''
@@ -226,6 +243,19 @@ async def start(rest_args: argparse.Namespace | None = None):
         args = parser.parse_args()
         filename = args.filename
         dnsbrute = (args.dns_brute, False)
+
+    try:
+        source_plan = resolve_sources(getattr(args, 'source', '') or ())
+    except ValueError as error:
+        if rest_args is not None:
+            raise
+        print(f'\n[!] {error}.\n')
+        sys.exit(1)
+
+    print(f'[*] {describe_activity(source_plan, actions=selected_actions(args))}')
+    if source_plan.exclusion_notice:
+        print(f'[*] {source_plan.exclusion_notice}')
+
     Core.quiet = getattr(args, 'quiet', False)
     try:
         db = stash.StashManager()
@@ -319,7 +349,9 @@ async def start(rest_args: argparse.Namespace | None = None):
     interesting_urls = []
     total_asns = []
 
-    async def store(
+    execution_schedule = SourceSchedule(source_plan)
+
+    async def _store(
         search_engine: Any,
         source: str,
         process_param: Any = None,
@@ -433,12 +465,19 @@ async def start(rest_args: argparse.Namespace | None = None):
             if len(fasns) > 0:
                 await db.store_all(word, fasns, 'asns', source)
 
+    def store(
+        search_engine: Any,
+        source: str,
+        *args: Any,
+        catalog_adapter: Any = None,
+        **kwargs: Any,
+    ) -> Awaitable[None]:
+        execution_schedule.register(source, catalog_adapter if catalog_adapter is not None else search_engine)
+        return _store(search_engine, source, *args, **kwargs)
+
     stor_lst = []
     if args.source is not None:
-        if args.source.lower() != 'all':
-            engines = sorted(set(map(str.strip, args.source.split(','))))
-        else:
-            engines = Core.get_supportedengines()
+        engines = list(source_plan.names)
         # Iterate through search engines in order
         if set(engines).issubset(Core.get_supportedengines()):
             print(f'\n[*] Target: {word} \n')
@@ -1038,7 +1077,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                         else:
                             print(f'An exception has occurred in SecurityScorecard search: {e}')
 
-                elif engineitem == 'securityTrails':
+                elif engineitem == 'securitytrails':
                     try:
                         securitytrails_search = securitytrailssearch.SearchSecuritytrail(word)
                         stor_lst.append(
@@ -1109,7 +1148,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                                 return list(self.hosts)
 
                         shodan_wrapper = ShodanWrapper(word, shodan_search)
-                        stor_lst.append(store(shodan_wrapper, engineitem, store_host=True))
+                        stor_lst.append(store(shodan_wrapper, engineitem, store_host=True, catalog_adapter=shodan_search))
                     except Exception as e:
                         if isinstance(e, MissingKey):
                             if not args.quiet:
@@ -1117,7 +1156,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                         else:
                             print(f'An exception has occurred in Shodan search: {e}')
 
-                elif engineitem == 'shodanInternetDB':
+                elif engineitem == 'shodaninternetdb':
                     try:
                         shodanidb_search = shodan_internetdb.SearchShodanInternetDB(word)
                         stor_lst.append(
@@ -1893,60 +1932,6 @@ async def start(rest_args: argparse.Namespace | None = None):
             print(f'\n[!] An exception has occurred in API Endpoints scanning: {e}')
             print('    Continuing with the rest of the scan...')
             traceback.print_exc()  # More detailed error information for developers
-
-    if 'securityscorecard' in engines:
-        try:
-            print('\n[*] Performing SecurityScorecard scan...')
-            securityscorecard_scanner = securityscorecard.SearchSecurityScorecard(word)
-            await securityscorecard_scanner.process(use_proxy)
-
-            # Use the existing API to get results
-            hosts = await securityscorecard_scanner.get_hostnames()
-            if hosts:
-                print(f'\n[*] SecurityScorecard results: {len(hosts)} hosts found')
-                for host in hosts:
-                    print(f'    - {host}')
-
-                all_hosts.extend(hosts)
-
-            ips = await securityscorecard_scanner.get_ips()
-            if ips:
-                print(f'\n[*] SecurityScorecard IPs found: {len(ips)}')
-                for ip in ips:
-                    print(f'    - {ip}')
-                all_ip.extend(ips)
-
-        except Exception as e:
-            print(f'An exception has occurred in SecurityScorecard scanning: {e}')
-
-    if 'builtwith' in engines:
-        try:
-            print('\n[*] Performing BuiltWith scan...')
-            builtwith_scanner = builtwith.SearchBuiltWith(word)
-            await builtwith_scanner.process(use_proxy)
-
-            hosts = await builtwith_scanner.get_hostnames()
-            if hosts:
-                print(f'\n[*] BuiltWith results: {len(hosts)} hosts found')
-                for host in hosts:
-                    print(f'    - {host}')
-
-                # Add results to the main host list
-                all_hosts.extend(hosts)
-
-            urls = list(await builtwith_scanner.get_interesting_urls())
-            if urls:
-                print(f'\n[*] BuiltWith interesting URLs found: {len(urls)}')
-                for url in urls:
-                    print(f'    - {url}')
-                interesting_urls.extend(urls)
-
-        except Exception as e:
-            if isinstance(e, MissingKey):
-                if not args.quiet:
-                    print(MissingKey('BuiltWith'))
-                else:
-                    print(f'An exception has occurred in BuiltWith scanning: {e}')
 
     if rest_args is not None:
         all_hosts = sorted({host.replace('www.', '') for host in all_hosts})
