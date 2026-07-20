@@ -205,10 +205,11 @@ async def test_rest_query_canonicalizes_aliases_before_execution(monkeypatch: py
 
     captured_source = ''
 
-    async def fake_start(args):
+    async def fake_start(args, *, return_evidence_run: bool = False):
         nonlocal captured_source
+        assert return_evidence_run is True
         captured_source = args.source
-        return ([], [], [], [], [], [], [], [], [])
+        return ([], [], [], [], [], [], [], [], [], None)
 
     monkeypatch.setattr(api.__main__, 'start', fake_start)
 
@@ -225,10 +226,11 @@ async def test_rest_all_preserves_passive_selection_notice(monkeypatch: pytest.M
 
     captured_source = ''
 
-    async def fake_start(args):
+    async def fake_start(args, *, return_evidence_run: bool = False):
         nonlocal captured_source
+        assert return_evidence_run is True
         captured_source = args.source
-        return ([], [], [], [], [], [], [], [], [])
+        return ([], [], [], [], [], [], [], [], [], None)
 
     monkeypatch.setattr(api.__main__, 'start', fake_start)
 
@@ -245,10 +247,11 @@ async def test_cli_and_rest_resolve_equivalent_activity_options(monkeypatch: pyt
 
     captured_args = Namespace()
 
-    async def fake_start(args):
+    async def fake_start(args, *, return_evidence_run: bool = False):
         nonlocal captured_args
+        assert return_evidence_run is True
         captured_args = args
-        return ([], [], [], [], [], [], [], [], [])
+        return ([], [], [], [], [], [], [], [], [], None)
 
     monkeypatch.setattr(api.__main__, 'start', fake_start)
     await api.query.__wrapped__(

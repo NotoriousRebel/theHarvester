@@ -17,6 +17,7 @@ from starlette.staticfiles import StaticFiles
 
 from theHarvester import __main__
 from theHarvester.lib.api.additional_endpoints import router as additional_router
+from theHarvester.lib.output import legacy_json_result
 from theHarvester.lib.source_catalog import resolve_sources
 
 API_RATE_LIMIT = os.getenv('API_RATE_LIMIT', '5/minute')
@@ -236,7 +237,7 @@ async def dnsbrute(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Domain must be at least 3 characters long')
 
         # Call the main function with the provided parameters
-        dns_bruteforce = await __main__.start(
+        *_, dns_bruteforce = await __main__.start(
             argparse.Namespace(
                 dns_brute=True,
                 dns_lookup=False,
@@ -254,6 +255,8 @@ async def dnsbrute(
                 wordlist='',
                 api_scan=False,
                 dns_resolve=dns_resolve,
+                quiet=False,
+                screenshot='',
             )
         )
 
@@ -342,6 +345,7 @@ async def query(
             aips,
             aemails,
             ahosts,
+            evidence_run,
         ) = await __main__.start(
             argparse.Namespace(
                 dns_brute=dns_brute,
@@ -360,23 +364,23 @@ async def query(
                 dns_resolve=dns_resolve,
                 quiet=False,
                 screenshot='',
-            )
+            ),
+            return_evidence_run=True,
         )
 
         # Return the results using the Pydantic model
-        return JSONResponse(
-            {
-                'asns': asns,
-                'interesting_urls': iurls,
-                'twitter_people': twitter_people_list,
-                'linkedin_people': linkedin_people_list,
-                'linkedin_links': linkedin_links,
-                'trello_urls': aurls,
-                'ips': aips,
-                'emails': aemails,
-                'hosts': ahosts,
-            }
-        )
+        response_data = {
+            'asns': asns,
+            'interesting_urls': iurls,
+            'twitter_people': twitter_people_list,
+            'linkedin_people': linkedin_people_list,
+            'linkedin_links': linkedin_links,
+            'trello_urls': aurls,
+            'ips': aips,
+            'emails': aemails,
+            'hosts': ahosts,
+        }
+        return JSONResponse(legacy_json_result(evidence_run, response_data) if evidence_run is not None else response_data)
     except HTTPException as e:
         # Re-raise HTTP exceptions
         raise e

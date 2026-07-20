@@ -46,6 +46,12 @@ class SourceStatus(StrEnum):
     SKIPPED = 'skipped'
 
 
+class RunStatus(StrEnum):
+    COMPLETE = 'complete'
+    PARTIAL = 'partial'
+    FAILED = 'failed'
+
+
 class SourceRateLimitedError(Exception):
     pass
 
@@ -58,6 +64,62 @@ class SourceSkippedError(Exception):
 class SourceFinding:
     value: str
     derivation: Derivation = Derivation.PROVIDER
+    observed_at: datetime | None = None
+
+
+class StageFindingKind(StrEnum):
+    HOSTNAME = 'hostname'
+    EMAIL = 'email'
+    IP_ADDRESS = 'ip-address'
+    PERSON = 'person'
+    URL = 'url'
+    INTERESTING_URL = 'interesting-url'
+    ASN = 'asn'
+    TAKEOVER = 'takeover'
+    API_ENDPOINT = 'api-endpoint'
+    SCREENSHOT = 'screenshot'
+    SHODAN_RESULT = 'shodan-result'
+
+
+@dataclass(frozen=True)
+class StageFinding:
+    kind: StageFindingKind
+    value: str
+    detail: str | None = None
+    derivation: Derivation = Derivation.PROVIDER
+
+
+@dataclass(frozen=True)
+class StageResult:
+    source: str
+    status: SourceStatus
+    duration_ms: float
+    result_count: int
+    findings: tuple[StageFinding, ...] = ()
+    source_family: str | None = None
+    error_type: str | None = None
+
+
+@dataclass(frozen=True)
+class SelectedObservation:
+    run_id: str
+    source: str
+    kind: str
+    value: str
+    detail: str | None
+    derivation: Derivation
+    collected_at: datetime
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            'run_id': self.run_id,
+            'source': self.source,
+            'kind': self.kind,
+            'value': self.value,
+            'detail': self.detail,
+            'derivation': self.derivation,
+            'collected_at': self.collected_at.isoformat(),
+        }
 
 
 class PassiveSource(Protocol):
@@ -201,9 +263,10 @@ class DiscoveryObservation:
     derivation: Derivation
     collected_at: datetime
     scope_class: ScopeClass
+    provider_observed_at: datetime | None = None
 
     def to_dict(self) -> dict[str, str]:
-        return {
+        result = {
             'run_id': self.run_id,
             'target': self.target,
             'value': self.value,
@@ -213,6 +276,9 @@ class DiscoveryObservation:
             'collected_at': self.collected_at.isoformat(),
             'scope_class': self.scope_class,
         }
+        if self.provider_observed_at is not None:
+            result['provider_observed_at'] = self.provider_observed_at.isoformat()
+        return result
 
 
 @dataclass(frozen=True)
@@ -315,6 +381,20 @@ class RunResult:
     observations: tuple[DiscoveryObservation, ...]
     dns_validations: tuple[DNSValidationObservation, ...]
     entities: tuple[MergedEntity, ...]
+    selected_observations: tuple[SelectedObservation, ...] = ()
+
+    @property
+    def status(self) -> RunStatus:
+        incomplete = {
+            SourceStatus.FAILED,
+            SourceStatus.RATE_LIMITED,
+            SourceStatus.SKIPPED,
+        }
+        if self.source_executions and all(execution.status is SourceStatus.FAILED for execution in self.source_executions):
+            return RunStatus.FAILED
+        if any(execution.status in incomplete for execution in self.source_executions):
+            return RunStatus.PARTIAL
+        return RunStatus.COMPLETE
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -322,10 +402,12 @@ class RunResult:
             'target': self.target,
             'started_at': self.started_at.isoformat(),
             'completed_at': self.completed_at.isoformat(),
+            'status': self.status,
             'source_executions': [execution.to_dict() for execution in self.source_executions],
             'observations': [observation.to_dict() for observation in self.observations],
             'dns_validations': [observation.to_dict() for observation in self.dns_validations],
             'entities': [entity.to_dict() for entity in self.entities],
+            'selected_observations': [observation.to_dict() for observation in self.selected_observations],
         }
 
 
@@ -357,6 +439,21 @@ class SQLiteRunStore:
             cursor = await database.execute('SELECT evidence_json FROM evidence_runs WHERE run_id = ?', (run_id,))
             row = await cursor.fetchone()
         return json.loads(row[0]) if row is not None else None
+
+
+def begin_run(target: str) -> RunResult:
+    """Create an empty evidence run for one finite invocation."""
+    started_at = datetime.now(UTC)
+    return RunResult(
+        run_id=str(uuid4()),
+        target=_normalize_hostname(target),
+        started_at=started_at,
+        completed_at=started_at,
+        source_executions=(),
+        observations=(),
+        dns_validations=(),
+        entities=(),
+    )
 
 
 def _normalize_hostname(value: str) -> str:
@@ -527,15 +624,20 @@ async def execute_run(
     *,
     resolver_vantages: Sequence[ResolverVantage] | None = None,
     store: SQLiteRunStore | None = None,
+    persist: bool = True,
+    base_result: RunResult | None = None,
 ) -> RunResult:
     if resolver_vantages is not None and (
         len(resolver_vantages) != _RESOLVER_VANTAGE_COUNT
         or len({resolver.name for resolver in resolver_vantages}) != _RESOLVER_VANTAGE_COUNT
     ):
         raise ValueError('DNS validation requires exactly three distinct resolver vantages')
+    base_result = base_result or begin_run(target)
     normalized_target = _normalize_hostname(target)
-    run_id = str(uuid4())
-    started_at = datetime.now(UTC)
+    if base_result.target != normalized_target:
+        raise ValueError('base run target does not match source target')
+    run_id = base_result.run_id
+    started_at = base_result.started_at
     started = time.perf_counter()
     observations: tuple[DiscoveryObservation, ...] = ()
     status = SourceStatus.FAILED
@@ -556,6 +658,7 @@ async def execute_run(
                 derivation=finding.derivation,
                 collected_at=collected_at,
                 scope_class=_classify_scope(normalized_target, value, finding.derivation),
+                provider_observed_at=finding.observed_at,
             )
             for finding in findings
         )
@@ -567,8 +670,9 @@ async def execute_run(
     except Exception as error:
         error_type = type(error).__name__
 
+    observations = (*base_result.observations, *observations)
     entities = _merge_observations(observations)
-    dns_validations: tuple[DNSValidationObservation, ...] = ()
+    dns_validations = base_result.dns_validations
     if resolver_vantages is not None:
         dns_validations, entities = await _validate_entities(run_id, normalized_target, entities, resolver_vantages)
     execution = SourceExecution(
@@ -587,12 +691,13 @@ async def execute_run(
         target=normalized_target,
         started_at=started_at,
         completed_at=datetime.now(UTC),
-        source_executions=(execution,),
+        source_executions=(*base_result.source_executions, execution),
         observations=observations,
         dns_validations=dns_validations,
         entities=entities,
     )
-    await (store or SQLiteRunStore()).save(result)
+    if persist:
+        await (store or SQLiteRunStore()).save(result)
     return result
 
 
@@ -603,4 +708,117 @@ def legacy_hostnames(result: RunResult) -> list[str]:
         for entity in result.entities
         if ScopeClass.IN_SCOPE in entity.scope_classes
         and (entity.addressability is Addressability.CURRENT or not result.dns_validations)
+    )
+
+
+def complete_run(result: RunResult, stage_results: Sequence[StageResult] = ()) -> RunResult:
+    """Merge selected stage results once and close the run."""
+    collected_at = datetime.now(UTC)
+    collected_findings = tuple((stage, finding) for stage in stage_results for finding in dict.fromkeys(stage.findings))
+    existing_observations = {
+        (observation.source, observation.value, observation.derivation) for observation in result.observations
+    }
+    added_observations = tuple(
+        DiscoveryObservation(
+            run_id=result.run_id,
+            target=result.target,
+            value=(value := _normalize_hostname(finding.value.split(':', 1)[0])),
+            source=stage.source,
+            source_family=stage.source_family or stage.source,
+            derivation=finding.derivation,
+            collected_at=collected_at,
+            scope_class=_classify_scope(result.target, value, finding.derivation),
+        )
+        for stage, finding in collected_findings
+        if finding.kind is StageFindingKind.HOSTNAME
+        and (
+            stage.source,
+            _normalize_hostname(finding.value.split(':', 1)[0]),
+            finding.derivation,
+        )
+        not in existing_observations
+    )
+    merged = _merge_observations((*result.observations, *added_observations))
+    previous_entities = {entity.value: entity for entity in result.entities}
+    entities = tuple(
+        replace(
+            entity,
+            addressability=previous.addressability,
+            dns_validations=previous.dns_validations,
+        )
+        if (previous := previous_entities.get(entity.value)) is not None
+        else entity
+        for entity in merged
+    )
+    selected_observations = tuple(
+        SelectedObservation(
+            run_id=result.run_id,
+            source=stage.source,
+            kind=finding.kind,
+            value=finding.value,
+            detail=finding.detail,
+            derivation=finding.derivation,
+            collected_at=collected_at,
+        )
+        for stage, finding in collected_findings
+        if finding.kind is not StageFindingKind.HOSTNAME
+    )
+    executions = list(result.source_executions)
+    executed_sources = {execution.source.casefold() for execution in executions}
+    for stage in stage_results:
+        if stage.source.casefold() in executed_sources:
+            continue
+        unique_stage_findings = tuple(dict.fromkeys(stage.findings))
+        executions.append(
+            SourceExecution(
+                run_id=result.run_id,
+                source=stage.source,
+                source_family=stage.source_family or stage.source,
+                status=stage.status,
+                duration_ms=stage.duration_ms,
+                result_count=stage.result_count,
+                observation_count=len(unique_stage_findings),
+                entity_count=len(
+                    {
+                        _normalize_hostname(finding.value.split(':', 1)[0])
+                        for finding in unique_stage_findings
+                        if finding.kind is StageFindingKind.HOSTNAME
+                    }
+                ),
+                error_type=stage.error_type,
+            )
+        )
+        executed_sources.add(stage.source.casefold())
+    return replace(
+        result,
+        completed_at=datetime.now(UTC),
+        source_executions=tuple(executions),
+        observations=(*result.observations, *added_observations),
+        entities=entities,
+        selected_observations=(*result.selected_observations, *selected_observations),
+    )
+
+
+async def validate_unvalidated_entities(
+    result: RunResult,
+    resolver_vantages: Sequence[ResolverVantage],
+) -> RunResult:
+    """Validate merged in-scope entities that do not yet carry DNS evidence."""
+    unvalidated = tuple(
+        entity for entity in result.entities if ScopeClass.IN_SCOPE in entity.scope_classes and not entity.dns_validations
+    )
+    if not unvalidated:
+        return result
+    validations, validated = await _validate_entities(
+        result.run_id,
+        result.target,
+        unvalidated,
+        resolver_vantages,
+    )
+    validated_by_value = {entity.value: entity for entity in validated}
+    return replace(
+        result,
+        completed_at=datetime.now(UTC),
+        dns_validations=(*result.dns_validations, *validations),
+        entities=tuple(validated_by_value.get(entity.value, entity) for entity in result.entities),
     )
