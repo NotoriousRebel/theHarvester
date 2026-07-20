@@ -300,6 +300,15 @@ async def query(
     dns_resolve: Annotated[
         str, Query(description='Perform DNS resolution on subdomains with a resolver list or passed in resolvers')
     ] = '',
+    dns_recursive_depth: Annotated[
+        int, Query(ge=0, description='Recursively discover DNS names beneath confirmed parents to this many levels')
+    ] = 0,
+    dns_recursive_query_limit: Annotated[
+        int, Query(gt=0, description='Maximum resolver-vantage query attempts for recursive DNS discovery')
+    ] = 10_000,
+    dns_recursive_runtime_seconds: Annotated[
+        float, Query(gt=0, description='Maximum runtime in seconds for recursive DNS discovery')
+    ] = 60.0,
     filename: Annotated[str, Query(description='Save the results to an XML and JSON file')] = '',
     proxies: Annotated[bool, Query(description='Use proxies for requests')] = False,
     shodan: Annotated[bool, Query(description='Use Shodan to query discovered hosts')] = False,
@@ -362,6 +371,9 @@ async def query(
                 wordlist=wordlist,
                 api_scan=api_scan,
                 dns_resolve=dns_resolve,
+                dns_recursive_depth=dns_recursive_depth,
+                dns_recursive_query_limit=dns_recursive_query_limit,
+                dns_recursive_runtime_seconds=dns_recursive_runtime_seconds,
                 quiet=False,
                 screenshot='',
             ),

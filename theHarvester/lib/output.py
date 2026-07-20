@@ -49,7 +49,12 @@ def print_linkedin_sections(
 def _entity_line(entity: MergedEntity, selected: Sequence[SelectedObservation] = ()) -> str:
     sources = ','.join(sorted({observation.source for observation in entity.observations}))
     selected_status = ''.join(f'; {observation.kind}={observation.detail or "observed"}' for observation in selected)
-    return f'{entity.value} [status={entity.addressability}; sources={sources}{selected_status}]'
+    recursive = next(
+        (observation for observation in entity.observations if observation.parent is not None),
+        None,
+    )
+    recursive_status = f'; derivation={recursive.derivation}; parent={recursive.parent}' if recursive is not None else ''
+    return f'{entity.value} [status={entity.addressability}; sources={sources}{selected_status}{recursive_status}]'
 
 
 def format_run_terminal(result: RunResult) -> str:
@@ -99,7 +104,14 @@ def format_run_terminal(result: RunResult) -> str:
         '[*] Source executions',
         *(
             f'{execution.source} [status={execution.status}; results={execution.result_count}; '
-            f'observations={execution.observation_count}]'
+            f'observations={execution.observation_count}'
+            + (
+                f'; queries={execution.query_count}; depth={execution.depth_reached}; '
+                f'zero-yield={execution.zero_yield_batches}; stop={execution.stop_reason}'
+                if execution.query_count is not None
+                else ''
+            )
+            + ']'
             for execution in result.source_executions
         ),
     ]
@@ -141,11 +153,15 @@ def _jsonl_entity(entity: MergedEntity) -> dict[str, object]:
 
 
 def _evidence_summary(result: RunResult) -> dict[str, object]:
-    return {
+    summary = {
         **_run_record(result),
         'source_executions': [execution.to_dict() for execution in result.source_executions],
         'selected_observations': [observation.to_dict() for observation in result.selected_observations],
     }
+    recursive_observations = [observation.to_dict() for observation in result.observations if observation.parent is not None]
+    if recursive_observations:
+        summary['recursive_observations'] = recursive_observations
+    return summary
 
 
 def _run_record(result: RunResult) -> dict[str, object]:
@@ -174,15 +190,39 @@ def evidence_xml_fragment(result: RunResult) -> str:
 def _evidence_xml_element(result: RunResult) -> Element:
     evidence_run = Element('evidence_run', run_id=result.run_id, status=result.status)
     for execution in result.source_executions:
-        SubElement(evidence_run, 'source', name=execution.source, status=execution.status)
-    for observation in result.selected_observations:
+        attributes = {'name': execution.source, 'status': execution.status}
+        if execution.query_count is not None:
+            attributes.update(
+                {
+                    'query_count': str(execution.query_count),
+                    'depth_reached': str(execution.depth_reached),
+                    'zero_yield_batches': str(execution.zero_yield_batches),
+                    'stop_reason': execution.stop_reason or '',
+                }
+            )
+        SubElement(evidence_run, 'source', attributes)
+    for recursive_observation in result.observations:
+        if recursive_observation.parent is None:
+            continue
+        SubElement(
+            evidence_run,
+            'discovery_observation',
+            {
+                'source': recursive_observation.source,
+                'value': recursive_observation.value,
+                'derivation': recursive_observation.derivation,
+                'parent': recursive_observation.parent,
+                'collected_at': recursive_observation.collected_at.isoformat(),
+            },
+        )
+    for selected_observation in result.selected_observations:
         attributes = {
-            'source': observation.source,
-            'kind': observation.kind,
-            'value': observation.value,
-            'collected_at': observation.collected_at.isoformat(),
+            'source': selected_observation.source,
+            'kind': selected_observation.kind,
+            'value': selected_observation.value,
+            'collected_at': selected_observation.collected_at.isoformat(),
         }
-        if observation.detail is not None:
-            attributes['detail'] = observation.detail
+        if selected_observation.detail is not None:
+            attributes['detail'] = selected_observation.detail
         SubElement(evidence_run, 'selected_observation', attributes)
     return evidence_run

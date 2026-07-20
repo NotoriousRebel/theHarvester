@@ -92,6 +92,7 @@ from theHarvester.lib.output import (
 from theHarvester.lib.run import (
     AioDNSResolverVantage,
     LegacyHostnameSource,
+    RecursiveDNSLimits,
     SourceExecution,
     SourceRateLimitedError,
     SourceSkippedError,
@@ -104,6 +105,7 @@ from theHarvester.lib.run import (
     complete_run,
     execute_run,
     legacy_hostnames,
+    run_recursive_dns,
     validate_unvalidated_entities,
 )
 from theHarvester.lib.source_catalog import SourceSchedule, canonical_source_names, describe_activity, resolve_sources
@@ -205,6 +207,24 @@ def build_parser() -> argparse.ArgumentParser:
         action='store_true',
     )
     parser.add_argument(
+        '--dns-recursive-depth',
+        help='Recursively discover DNS names beneath confirmed parents to this many levels (P1 DNS interaction).',
+        default=0,
+        type=int,
+    )
+    parser.add_argument(
+        '--dns-recursive-query-limit',
+        help='Maximum resolver-vantage query attempts for recursive DNS discovery.',
+        default=10_000,
+        type=int,
+    )
+    parser.add_argument(
+        '--dns-recursive-runtime-seconds',
+        help='Maximum runtime in seconds for recursive DNS discovery.',
+        default=60.0,
+        type=float,
+    )
+    parser.add_argument(
         '-f',
         '--filename',
         help='Save the results to an XML and JSON file.',
@@ -235,6 +255,7 @@ def selected_actions(args: argparse.Namespace) -> tuple[str, ...]:
         for name, enabled in (
             ('dns-brute', getattr(args, 'dns_brute', False)),
             ('dns-lookup', getattr(args, 'dns_lookup', False)),
+            ('dns-recursive', getattr(args, 'dns_recursive_depth', 0) > 0),
             ('dns-resolve', dns_resolve is None or bool(dns_resolve)),
             ('shodan', getattr(args, 'shodan', False)),
             ('api-scan', getattr(args, 'api_scan', False)),
@@ -353,6 +374,28 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
             raise resolver_error
         print(f'\n[!] {resolver_error}.\n')
         sys.exit(1)
+    recursive_limits = None
+    recursive_depth = getattr(args, 'dns_recursive_depth', 0)
+    if recursive_depth < 0:
+        depth_error = ValueError('--dns-recursive-depth cannot be negative')
+        if rest_args is not None:
+            raise depth_error
+        print(f'\n[!] {depth_error}.\n')
+        sys.exit(1)
+    if recursive_depth > 0:
+        try:
+            recursive_limits = RecursiveDNSLimits(
+                depth=recursive_depth,
+                query_limit=getattr(args, 'dns_recursive_query_limit', 10_000),
+                runtime_seconds=getattr(args, 'dns_recursive_runtime_seconds', 60.0),
+            )
+            if len(final_dns_resolver_list) != 3:
+                raise ValueError('--dns-recursive-depth requires --dns-resolve with exactly three resolver vantages')
+        except ValueError as error:
+            if rest_args is not None:
+                raise
+            print(f'\n[!] {error}.\n')
+            sys.exit(1)
 
     engines: list = []
     # If the user specifies
@@ -2030,6 +2073,8 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
 
     recorded_stages = {result.source.casefold() for result in stage_results}
     for action in selected_actions(args):
+        if action == 'dns-recursive':
+            continue
         stage_source = f'action:{action}'
         if stage_source.casefold() not in recorded_stages:
             stage_results.append(
@@ -2055,6 +2100,34 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
                     completed_run_result,
                     resolver_vantages,
                 )
+                if recursive_limits is not None:
+                    recursive_started = time.perf_counter()
+                    try:
+                        completed_run_result = await run_recursive_dns(
+                            completed_run_result,
+                            resolver_vantages,
+                            dnssearch.DNS_NAMES.read_text(encoding='utf-8').splitlines(),
+                            recursive_limits,
+                        )
+                    except Exception as error:
+                        completed_run_result = replace(
+                            completed_run_result,
+                            source_executions=(
+                                *completed_run_result.source_executions,
+                                SourceExecution(
+                                    run_id=completed_run_result.run_id,
+                                    source='action:dns-recursive',
+                                    source_family='dns-recursive',
+                                    status=SourceStatus.FAILED,
+                                    duration_ms=(time.perf_counter() - recursive_started) * 1000,
+                                    result_count=0,
+                                    observation_count=0,
+                                    entity_count=0,
+                                    error_type=type(error).__name__,
+                                ),
+                            ),
+                        )
+                        print(f'[!] Recursive DNS discovery failed: {error}')
         except Exception as error:
             completed_run_result = replace(
                 completed_run_result,
@@ -2069,6 +2142,24 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
                     for execution in completed_run_result.source_executions
                 ),
             )
+            if recursive_limits is not None:
+                completed_run_result = replace(
+                    completed_run_result,
+                    source_executions=(
+                        *completed_run_result.source_executions,
+                        SourceExecution(
+                            run_id=completed_run_result.run_id,
+                            source='action:dns-recursive',
+                            source_family='dns-recursive',
+                            status=SourceStatus.SKIPPED,
+                            duration_ms=0,
+                            result_count=0,
+                            observation_count=0,
+                            entity_count=0,
+                            error_type='DNSValidationFailed',
+                        ),
+                    ),
+                )
             print(f'[!] DNS validation failed: {error}')
     await SQLiteRunStore().save(completed_run_result)
     print(format_run_terminal(completed_run_result))
