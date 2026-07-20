@@ -19,3 +19,4 @@ api-keys.yaml
 .venv/**
 .pyre
 .junie
+docs/agents/
