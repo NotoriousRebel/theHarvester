@@ -128,10 +128,6 @@ class Core:
         return Core._api_key_value('bitbucket')
 
     @staticmethod
-    def brave_key() -> str:
-        return Core._api_key_value('brave')
-
-    @staticmethod
     def bufferoverun_key() -> str:
         return Core._api_key_value('bufferoverun')
 
