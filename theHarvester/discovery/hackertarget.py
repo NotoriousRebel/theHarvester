@@ -1,17 +1,21 @@
 # theHarvester/discovery/hackertarget.py
+import ipaddress
+
 from theHarvester.lib.core import AsyncFetcher, Core
 
 
 class SearchHackerTarget:
     """Class uses the HackerTarget API to gather subdomains and IPs.
 
-    This version supports reading a Hackertarget API key (if present) and
-    appending it to the hackertarget request URLs as `apikey=<key>`.
+    Provider APIs:
+    https://hackertarget.com/hostsearch/
+    https://hackertarget.com/reverse-dns-lookup/
     """
 
     def __init__(self, word) -> None:
         self.word = word
-        self.total_results = ''
+        self.totalhosts: set[str] = set()
+        self.totalips: set[str] = set()
         self.hostname = 'https://api.hackertarget.com'
         self.proxy = False
         self.results = None
@@ -35,14 +39,29 @@ class SearchHackerTarget:
         # fetch all using existing AsyncFetcher helper
         responses = await AsyncFetcher.fetch_all(request_urls, headers=headers, proxy=self.proxy)
 
-        # the original code concatenated responses and replaced commas with colons
-        for response in responses:
-            # response is expected to be a string; keep the original behavior
-            self.total_results += response.replace(',', ':')
+        for index, response in enumerate(responses[:2]):
+            if not isinstance(response, str):
+                continue
+            for line in response.splitlines():
+                fields = [field.strip() for field in line.split(',', 1)]
+                if len(fields) != 2:
+                    continue
+                hostname, address = fields if index == 0 else fields[::-1]
+                if not hostname:
+                    continue
+                try:
+                    ipaddress.ip_address(address)
+                except ValueError:
+                    continue
+                self.totalhosts.add(hostname)
+                self.totalips.add(address)
 
     async def process(self, proxy: bool = False) -> None:
         self.proxy = proxy
         await self.do_search()
 
-    async def get_hostnames(self) -> list:
-        return [result for result in self.total_results.splitlines() if 'No PTR records found' not in result]
+    async def get_hostnames(self) -> set[str]:
+        return self.totalhosts
+
+    async def get_ips(self) -> set[str]:
+        return self.totalips

@@ -1,14 +1,21 @@
-import re
+import csv
+import ipaddress
 
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib.core import AsyncFetcher, Core
 
 
 class SearchBufferover:
+    """Query BufferOver's documented TLS DNS API.
+
+    Provider API: https://tls.bufferover.run/
+    Result rows: IP, certificate SHA-256, certificate organization, CN/SNI.
+    """
+
     def __init__(self, word) -> None:
         self.word = word
-        self.totalhosts: set = set()
-        self.totalips: set = set()
+        self.totalhosts: set[str] = set()
+        self.totalips: set[str] = set()
         self.key = Core.bufferoverun_key()
         if self.key is None:
             raise MissingKey('bufferoverun')
@@ -22,25 +29,22 @@ class SearchBufferover:
             headers={'User-Agent': Core.get_user_agent(), 'x-api-key': f'{self.key}'},
             proxy=self.proxy,
         )
-        dct = response[0]
-        if dct['Results']:
-            self.totalhosts = {
-                (
-                    host.split(',')
-                    if ',' in host and self.word.replace('www.', '') in host.split(',')[0] in host
-                    else host.split(',')[4]
-                )
-                for host in dct['Results']
-            }
+        for row in csv.reader(response[0].get('Results') or []):
+            if len(row) != 4:
+                continue
+            address, _certificate_hash, _organization, hostname = (value.strip() for value in row)
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                continue
+            self.totalips.add(address)
+            if hostname:
+                self.totalhosts.add(hostname)
 
-        self.totalips = {
-            ip.split(',')[0] for ip in dct['Results'] if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip.split(',')[0])
-        }
-
-    async def get_hostnames(self) -> set:
+    async def get_hostnames(self) -> set[str]:
         return self.totalhosts
 
-    async def get_ips(self) -> set:
+    async def get_ips(self) -> set[str]:
         return self.totalips
 
     async def process(self, proxy: bool = False) -> None:

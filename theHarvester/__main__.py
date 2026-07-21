@@ -737,7 +737,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                 elif engineitem == 'hackertarget':
                     try:
                         hackertarget_search = hackertarget.SearchHackerTarget(word)
-                        stor_lst.append(store(hackertarget_search, engineitem, store_host=True))
+                        stor_lst.append(store(hackertarget_search, engineitem, store_host=True, store_ip=True))
                     except Exception as e:
                         show_default_error_message(engineitem, word, e)
 
