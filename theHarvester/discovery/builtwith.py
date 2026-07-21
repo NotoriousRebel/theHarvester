@@ -71,7 +71,7 @@ class SearchBuiltWith:
     async def get_tech_stack(self) -> dict:
         return self.tech_stack
 
-    async def get_interesting_urls(self) -> set[str]:
+    async def get_interestingurls(self) -> set[str]:
         return self.interesting_urls
 
     async def get_frameworks(self) -> set[str]:

@@ -1,6 +1,5 @@
 import asyncio
 from typing import Any
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -70,17 +69,5 @@ class SearchIntelx:
     async def get_emails(self) -> list[str]:
         return self.info[0]
 
-    async def get_interestingurls(self) -> tuple[list[str], list[str]]:
-        urls = self.info[1]
-        subdomains = []
-
-        for url in urls:
-            try:
-                parsed = urlparse(url)
-                domain = parsed.netloc
-                if domain.count('.') > 1 and self.word in domain:
-                    subdomains.append(domain)
-            except Exception:
-                continue
-
-        return urls, list(set(subdomains))
+    async def get_interestingurls(self) -> list[str]:
+        return self.info[1]

@@ -873,7 +873,6 @@ async def start(rest_args: argparse.Namespace | None = None):
                                 netlas_search,
                                 engineitem,
                                 store_host=True,
-                                store_ip=True,
                             )
                         )
                     except Exception as e:
@@ -1012,8 +1011,6 @@ async def start(rest_args: argparse.Namespace | None = None):
                                 engineitem,
                                 store_host=True,
                                 store_ip=True,
-                                store_interestingurls=True,
-                                store_asns=True,
                             )
                         )
                     except Exception as e:
@@ -1877,60 +1874,6 @@ async def start(rest_args: argparse.Namespace | None = None):
             print(f'\n[!] An exception has occurred in API Endpoints scanning: {e}')
             print('    Continuing with the rest of the scan...')
             traceback.print_exc()  # More detailed error information for developers
-
-    if 'securityscorecard' in engines:
-        try:
-            print('\n[*] Performing SecurityScorecard scan...')
-            securityscorecard_scanner = securityscorecard.SearchSecurityScorecard(word)
-            await securityscorecard_scanner.process(use_proxy)
-
-            # Use the existing API to get results
-            hosts = await securityscorecard_scanner.get_hostnames()
-            if hosts:
-                print(f'\n[*] SecurityScorecard results: {len(hosts)} hosts found')
-                for host in hosts:
-                    print(f'    - {host}')
-
-                all_hosts.extend(hosts)
-
-            ips = await securityscorecard_scanner.get_ips()
-            if ips:
-                print(f'\n[*] SecurityScorecard IPs found: {len(ips)}')
-                for ip in ips:
-                    print(f'    - {ip}')
-                all_ip.extend(ips)
-
-        except Exception as e:
-            print(f'An exception has occurred in SecurityScorecard scanning: {e}')
-
-    if 'builtwith' in engines:
-        try:
-            print('\n[*] Performing BuiltWith scan...')
-            builtwith_scanner = builtwith.SearchBuiltWith(word)
-            await builtwith_scanner.process(use_proxy)
-
-            hosts = await builtwith_scanner.get_hostnames()
-            if hosts:
-                print(f'\n[*] BuiltWith results: {len(hosts)} hosts found')
-                for host in hosts:
-                    print(f'    - {host}')
-
-                # Add results to the main host list
-                all_hosts.extend(hosts)
-
-            urls = list(await builtwith_scanner.get_interesting_urls())
-            if urls:
-                print(f'\n[*] BuiltWith interesting URLs found: {len(urls)}')
-                for url in urls:
-                    print(f'    - {url}')
-                interesting_urls.extend(urls)
-
-        except Exception as e:
-            if isinstance(e, MissingKey):
-                if not args.quiet:
-                    print(MissingKey('BuiltWith'))
-                else:
-                    print(f'An exception has occurred in BuiltWith scanning: {e}')
 
     if rest_args is not None:
         all_hosts = sorted({host.replace('www.', '') for host in all_hosts})
