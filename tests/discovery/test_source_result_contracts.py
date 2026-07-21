@@ -56,6 +56,22 @@ class DummyBuiltWith:
         return {'https://api.example.com/path'}
 
 
+class DummyHackerTarget:
+    process_calls = 0
+
+    def __init__(self, _domain: str) -> None:
+        pass
+
+    async def process(self, _proxy: bool = False) -> None:
+        type(self).process_calls += 1
+
+    async def get_hostnames(self) -> set[str]:
+        return {'api.example.com'}
+
+    async def get_ips(self) -> set[str]:
+        return {'192.0.2.10'}
+
+
 @pytest.mark.parametrize(
     ('source', 'module_name', 'class_name', 'search_class', 'expected_results'),
     [
@@ -73,6 +89,13 @@ class DummyBuiltWith:
             'SearchSecurityScorecard',
             DummySecurityScorecard,
             ('api.example.com', '192.0.2.1'),
+        ),
+        (
+            'hackertarget',
+            'hackertarget',
+            'SearchHackerTarget',
+            DummyHackerTarget,
+            ('api.example.com', '192.0.2.10'),
         ),
     ],
 )
