@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -15,7 +16,7 @@ import aiodns
 import aiosqlite
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 
 class Derivation(StrEnum):
@@ -87,6 +88,31 @@ class StageFinding:
     value: str
     detail: str | None = None
     derivation: Derivation = Derivation.PROVIDER
+    attributes: dict[str, object] | None = field(default=None, hash=False)
+
+
+def person_stage_finding(person: Mapping[str, object]) -> StageFinding | None:
+    allowed_attributes = (
+        'email',
+        'firstname',
+        'lastname',
+        'company',
+        'role',
+        'job_title',
+        'department',
+        'industry',
+        'city',
+        'state',
+        'country',
+    )
+    attributes = {key: person[key] for key in allowed_attributes if key in person}
+    if not attributes:
+        return None
+    return StageFinding(
+        StageFindingKind.PERSON,
+        '',
+        attributes=attributes,
+    )
 
 
 @dataclass(frozen=True)
@@ -109,9 +135,10 @@ class SelectedObservation:
     detail: str | None
     derivation: Derivation
     collected_at: datetime
+    attributes: dict[str, object] | None = None
 
-    def to_dict(self) -> dict[str, str | None]:
-        return {
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
             'run_id': self.run_id,
             'source': self.source,
             'kind': self.kind,
@@ -120,6 +147,22 @@ class SelectedObservation:
             'derivation': self.derivation,
             'collected_at': self.collected_at.isoformat(),
         }
+        if self.attributes is not None:
+            result['attributes'] = self.attributes
+        return result
+
+
+def _person_identity(attributes: dict[str, object]) -> str:
+    email = attributes.get('email')
+    if isinstance(email, str) and (email := email.strip()):
+        return email
+    name = ' '.join(
+        value.strip() for key in ('firstname', 'lastname') if isinstance((value := attributes.get(key)), str) and value.strip()
+    )
+    if name:
+        return name
+    serialized = json.dumps(attributes, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
+    return f'person-{hashlib.sha256(serialized.encode()).hexdigest()[:12]}'
 
 
 class PassiveSource(Protocol):
@@ -670,6 +713,8 @@ async def execute_run(
     except Exception as error:
         error_type = type(error).__name__
 
+    source_observation_count = len(observations)
+    source_entity_count = len({observation.value for observation in observations})
     observations = (*base_result.observations, *observations)
     entities = _merge_observations(observations)
     dns_validations = base_result.dns_validations
@@ -682,8 +727,8 @@ async def execute_run(
         status=status,
         duration_ms=(time.perf_counter() - started) * 1000,
         result_count=result_count,
-        observation_count=len(observations),
-        entity_count=len(entities),
+        observation_count=source_observation_count,
+        entity_count=source_entity_count,
         error_type=error_type,
     )
     result = RunResult(
@@ -755,10 +800,15 @@ def complete_run(result: RunResult, stage_results: Sequence[StageResult] = ()) -
             run_id=result.run_id,
             source=stage.source,
             kind=finding.kind,
-            value=finding.value,
+            value=(
+                _person_identity(finding.attributes)
+                if finding.kind is StageFindingKind.PERSON and finding.attributes is not None
+                else finding.value
+            ),
             detail=finding.detail,
             derivation=finding.derivation,
             collected_at=collected_at,
+            attributes=dict(finding.attributes) if finding.attributes is not None else None,
         )
         for stage, finding in collected_findings
         if finding.kind is not StageFindingKind.HOSTNAME

@@ -183,6 +183,164 @@ def test_filename_help_names_every_report_format() -> None:
     assert 'Save XML, legacy JSON, and normalized JSONL reports.' in build_parser().format_help()
 
 
+@pytest.mark.asyncio
+async def test_cli_collector_curates_people_and_preserves_shodan_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import theHarvester.__main__ as main_module
+
+    person = {
+        'email': 'ada@example.com',
+        'firstname': 'Ada',
+        'lastname': 'Lovelace',
+        'company': 'Example Corp',
+        'city': 'London',
+        'phone': '+1-555-0100',
+        'address': 'sensitive address',
+        'zip_code': '12345',
+        'dob': '1815-12-10',
+        'password': 'must-not-appear',
+    }
+    sensitive_only_person = {
+        'phone': '+1-555-0199',
+        'address': 'another sensitive address',
+        'dob': '1900-01-01',
+    }
+    named_person = {'firstname': 'Grace', 'lastname': 'Hopper'}
+    role_only_person = {'role': 'researcher'}
+    shodan_attributes = {
+        'asn': 'AS64500',
+        'domains': ['example.com'],
+        'hostnames': ['api.example.com'],
+        'ip_str': '192.0.2.10',
+        'isp': 'Example ISP',
+        'org': 'Example Corp',
+        'ports': [443],
+        'product': 'nginx',
+        'server': 'nginx',
+        'technologies': ['nginx'],
+        'title': 'Example',
+    }
+
+    class FakeVenacusSearch:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        async def process(self, _proxy: bool = False) -> None:
+            return None
+
+        async def get_people(self) -> list[dict[str, str]]:
+            return [person, named_person, role_only_person, sensitive_only_person]
+
+        async def get_emails(self) -> set[str]:
+            return {'ada@example.com'}
+
+        async def get_ips(self) -> set[str]:
+            return {'192.0.2.10'}
+
+        async def get_interestingurls(self) -> set[str]:
+            return set()
+
+    class FakeShodanSearch:
+        def __init__(self) -> None:
+            return None
+
+        async def search_ip(self, ip: str) -> dict[str, object]:
+            return {ip: shodan_attributes}
+
+    class FakeStashManager:
+        async def do_init(self) -> None:
+            return None
+
+        async def store_all(self, *_args: object) -> None:
+            return None
+
+    class FakeRunStore:
+        async def save(self, _result: RunResult) -> None:
+            return None
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(main_module.venacussearch, 'SearchVenacus', FakeVenacusSearch)
+    monkeypatch.setattr(main_module.shodansearch, 'SearchShodan', FakeShodanSearch)
+    monkeypatch.setattr(main_module.stash, 'StashManager', FakeStashManager)
+    monkeypatch.setattr(main_module, 'SQLiteRunStore', FakeRunStore)
+    monkeypatch.setattr(main_module.asyncio, 'sleep', no_sleep)
+
+    response = await main_module.start(
+        SimpleNamespace(
+            api_scan=False,
+            dns_brute=False,
+            dns_lookup=False,
+            dns_resolve='',
+            dns_server=None,
+            domain='example.com',
+            filename='',
+            limit=500,
+            proxies=False,
+            quiet=True,
+            screenshot='',
+            shodan=True,
+            source='venacus',
+            start=0,
+            take_over=False,
+            wordlist='',
+        ),
+        return_evidence_run=True,
+    )
+
+    result = response[-1]
+    jsonl = run_result_jsonl(result)
+    records = [json.loads(line) for line in jsonl.splitlines()]
+    selected = [
+        record['data']
+        for record in records
+        if record['record_type'] == 'selected_observation' and record['data']['kind'] in {'person', 'shodan-result'}
+    ]
+    people_records = [record for record in selected if record['kind'] == 'person']
+    shodan_record = next(record for record in selected if record['kind'] == 'shodan-result')
+
+    assert [(record['value'], record['attributes']) for record in people_records] == [
+        (
+            'ada@example.com',
+            {
+                'email': 'ada@example.com',
+                'firstname': 'Ada',
+                'lastname': 'Lovelace',
+                'company': 'Example Corp',
+                'city': 'London',
+            },
+        ),
+        ('Grace Hopper', named_person),
+        ('person-15cd96492d3a', role_only_person),
+    ]
+    assert 'must-not-appear' not in jsonl
+    assert '+1-555-' not in jsonl
+    assert 'sensitive address' not in jsonl
+    assert shodan_record['value'] == '192.0.2.10'
+    assert shodan_record['detail'] is None
+    assert shodan_record['attributes'] == shodan_attributes
+    legacy_people = [{'name': 'existing person'}]
+    legacy_shodan = [['existing shodan row']]
+    legacy = legacy_json_result(result, {'people': legacy_people, 'shodan': legacy_shodan})
+    evidence_xml = ElementTree.fromstring(evidence_xml_fragment(result))
+
+    assert legacy['people'] == legacy_people
+    assert legacy['shodan'] == legacy_shodan
+    assert evidence_xml.tag == 'evidence_run'
+    assert [
+        (item.attrib['kind'], item.attrib['value'], item.attrib.get('detail'))
+        for item in evidence_xml.findall('selected_observation')
+        if item.attrib['kind'] in {'person', 'shodan-result'}
+    ] == [
+        ('person', 'ada@example.com', None),
+        ('person', 'Grace Hopper', None),
+        ('person', 'person-15cd96492d3a', None),
+        ('shodan-result', '192.0.2.10', None),
+    ]
+
+
 @pytest.mark.parametrize(
     ('error', 'expected_run_status', 'expected_source_status'),
     [

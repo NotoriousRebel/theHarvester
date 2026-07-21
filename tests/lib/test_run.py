@@ -52,6 +52,17 @@ class OneCandidateSource:
         return [SourceFinding(self.candidate)]
 
 
+class SourceWithFindings:
+    family = 'fixture-family'
+
+    def __init__(self, name: str, *values: str) -> None:
+        self.name = name
+        self.values = values
+
+    async def collect(self, _target: str) -> list[SourceFinding]:
+        return [SourceFinding(value) for value in self.values]
+
+
 class FakeResolverVantage:
     def __init__(self, name: str, candidate: str, response: DNSResponse) -> None:
         self.name = name
@@ -415,6 +426,28 @@ async def test_execute_run_records_scoped_normalized_evidence_end_to_end(tmp_pat
 
     assert await store.load(result.run_id) == result.to_dict()
     assert FakePassiveSource.raw_payload.encode() not in database.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_reports_source_local_completeness_counts() -> None:
+    first = await execute_run(
+        'example.com',
+        SourceWithFindings('first', 'one.example.com', 'shared.example.com'),
+        persist=False,
+    )
+    result = await execute_run(
+        'example.com',
+        SourceWithFindings('second', 'shared.example.com', 'two.example.com', 'two.example.com'),
+        base_result=first,
+        persist=False,
+    )
+
+    assert [
+        (execution.source, execution.observation_count, execution.entity_count) for execution in result.source_executions
+    ] == [
+        ('first', 2, 2),
+        ('second', 3, 2),
+    ]
 
 
 class OutcomeSource:

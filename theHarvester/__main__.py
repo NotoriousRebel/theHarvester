@@ -104,6 +104,7 @@ from theHarvester.lib.run import (
     complete_run,
     execute_run,
     legacy_hostnames,
+    person_stage_finding,
     validate_unvalidated_entities,
 )
 from theHarvester.lib.source_catalog import SourceSchedule, canonical_source_names, describe_activity, resolve_sources
@@ -533,9 +534,9 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
             all_people.extend(people_list)
             await db_stash.store_all(word, people_list, 'people', source)
             if stage_findings is not None:
-                stage_findings.extend(
-                    StageFinding(StageFindingKind.PERSON, ujson.dumps(person, sort_keys=True)) for person in people_list
-                )
+                for person in people_list:
+                    if finding := person_stage_finding(person):
+                        stage_findings.append(finding)
 
         if store_links:
             links = await search_engine.get_links()
@@ -1912,7 +1913,7 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
                             StageFinding(
                                 StageFindingKind.SHODAN_RESULT,
                                 ip,
-                                ujson.dumps(shodandict[ip], sort_keys=True),
+                                attributes=dict(shodandict[ip]),
                             )
                         )
                         print(ujson.dumps(shodandict[ip], indent=4, sort_keys=True))
