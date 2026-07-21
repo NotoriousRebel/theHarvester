@@ -140,6 +140,16 @@ async def test_one_completed_run_drives_every_output_surface_without_losing_lega
         'selected_observation',
     }
     assert all(record['schema_version'] == 'theharvester-evidence-v1' for record in records)
+    assert all(record['run_id'] == result.run_id for record in records)
+    assert all(record['target'] == 'example.com' for record in records)
+    run_record = next(record['data'] for record in records if record['record_type'] == 'run')
+    assert run_record['record_counts'] == {
+        'source_executions': sum(record['record_type'] == 'source_execution' for record in records),
+        'discovery_observations': sum(record['record_type'] == 'discovery_observation' for record in records),
+        'dns_validation_observations': sum(record['record_type'] == 'dns_validation_observation' for record in records),
+        'merged_results': sum(record['record_type'] == 'merged_result' for record in records),
+        'selected_observations': sum(record['record_type'] == 'selected_observation' for record in records),
+    }
     discovery_records = [record['data'] for record in records if record['record_type'] == 'discovery_observation']
     assert all(record['collected_at'] for record in discovery_records)
     assert discovery_records[0]['provider_observed_at'] == '2026-07-15T12:00:00+00:00'
@@ -165,6 +175,12 @@ async def test_one_completed_run_drives_every_output_surface_without_losing_lega
     assert rest['hosts'] == ['api.example.com']
     assert rest['evidence_run']['run_id'] == result.run_id
     assert await store.load(result.run_id) == result.to_dict()
+
+
+def test_filename_help_names_every_report_format() -> None:
+    from theHarvester.__main__ import build_parser
+
+    assert 'Save XML, legacy JSON, and normalized JSONL reports.' in build_parser().format_help()
 
 
 @pytest.mark.parametrize(

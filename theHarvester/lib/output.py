@@ -120,7 +120,15 @@ def run_result_jsonl(result: RunResult) -> str:
         *(('selected_observation', observation.to_dict()) for observation in result.selected_observations),
     ]
     return '\n'.join(
-        json.dumps({'schema_version': 'theharvester-evidence-v1', 'record_type': record_type, 'data': data})
+        json.dumps(
+            {
+                'schema_version': 'theharvester-evidence-v1',
+                'run_id': result.run_id,
+                'target': result.target,
+                'record_type': record_type,
+                'data': data,
+            }
+        )
         for record_type, data in records
     )
 
@@ -155,6 +163,13 @@ def _run_record(result: RunResult) -> dict[str, object]:
         'status': result.status,
         'started_at': result.started_at.isoformat(),
         'completed_at': result.completed_at.isoformat(),
+        'record_counts': {
+            'source_executions': len(result.source_executions),
+            'discovery_observations': len(result.observations),
+            'dns_validation_observations': len(result.dns_validations),
+            'merged_results': len(result.entities),
+            'selected_observations': len(result.selected_observations),
+        },
     }
 
 

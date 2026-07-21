@@ -207,7 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '-f',
         '--filename',
-        help='Save the results to an XML and JSON file.',
+        help='Save XML, legacy JSON, and normalized JSONL reports.',
         default='',
         type=str,
     )
