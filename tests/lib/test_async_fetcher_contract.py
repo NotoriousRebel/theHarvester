@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 
 from theHarvester.lib import core as core_module
-from theHarvester.lib.core import AsyncFetcher
+from theHarvester.lib.core import AsyncFetcher, FetcherResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -274,8 +274,16 @@ async def test_fetch_returns_empty_string_for_malformed_json(unused_tcp_port: in
 
     async with running_app(app, unused_tcp_port) as base_url:
         result = await AsyncFetcher.fetch(url=base_url, json=True)
+        metadata_result = await AsyncFetcher.fetch(
+            url=base_url,
+            json=True,
+            response_delay=0,
+            include_metadata=True,
+        )
 
     assert result == ''
+    assert isinstance(metadata_result, FetcherResponse)
+    assert (metadata_result.body, metadata_result.status) == ('{not-json', 200)
 
 
 @pytest.mark.asyncio
@@ -295,6 +303,31 @@ async def test_fetch_returns_error_response_body(unused_tcp_port: int, status: i
         result = await AsyncFetcher.fetch(url=base_url)
 
     assert result == body
+
+
+@pytest.mark.asyncio
+async def test_fetch_can_preserve_status_headers_and_json_body(unused_tcp_port: int) -> None:
+    async def rate_limited(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {'error': 'rate limited'},
+            status=429,
+            headers={'Retry-After': '12'},
+        )
+
+    app = web.Application()
+    app.router.add_get('/', rate_limited)
+
+    async with running_app(app, unused_tcp_port) as base_url:
+        result = await AsyncFetcher.fetch(
+            url=base_url,
+            json=True,
+            response_delay=0,
+            include_metadata=True,
+        )
+
+    assert isinstance(result, FetcherResponse)
+    assert (result.body, result.status, result.headers['retry-after']) == ({'error': 'rate limited'}, 429, '12')
+    assert 'Retry-After' not in result.headers
 
 
 @pytest.mark.asyncio
@@ -318,8 +351,12 @@ async def test_fetch_returns_empty_string_on_request_timeout(unused_tcp_port: in
 @pytest.mark.asyncio
 async def test_fetch_returns_empty_string_on_transport_failure(unused_tcp_port: int) -> None:
     result = await AsyncFetcher.fetch(url=f'http://127.0.0.1:{unused_tcp_port}')
+    metadata_result = await AsyncFetcher.fetch(
+        url=f'http://127.0.0.1:{unused_tcp_port}',
+        include_metadata=True,
+    )
 
-    assert result == ''
+    assert (result, metadata_result) == ('', None)
 
 
 @pytest.mark.asyncio

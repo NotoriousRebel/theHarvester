@@ -46,6 +46,19 @@ class _RequestPlan:
     request_timeout: int | None
 
 
+@dataclass(frozen=True)
+class FetcherResponse:
+    """Buffered HTTP response data for callers that need status or rate-limit headers.
+
+    Header names are lower-case so lookups remain predictable after aiohttp closes
+    the response.
+    """
+
+    body: Any
+    status: int
+    headers: dict[str, str]
+
+
 class Core:
     quiet: bool = False
     _API_KEY_FIELDS: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -542,15 +555,35 @@ class AsyncFetcher:
         return aiohttp.ClientSession(headers=headers, timeout=client_timeout, connector=connector)
 
     @staticmethod
-    async def _read_response(response: aiohttp.ClientResponse, *, json: bool, delay: int) -> Any:
+    async def _read_response(
+        response: aiohttp.ClientResponse,
+        *,
+        json: bool,
+        delay: int,
+        include_metadata: bool = False,
+    ) -> Any:
         await asyncio.sleep(delay)
-        return await response.text() if json is False else await response.json()
+        try:
+            body = await response.text() if json is False else await response.json()
+        except (aiohttp.ContentTypeError, ValueError):
+            if not include_metadata:
+                raise
+            body = await response.text()
+        if not include_metadata:
+            return body
+        return FetcherResponse(
+            body=body,
+            status=response.status,
+            headers={name.lower(): value for name, value in response.headers.items()},
+        )
 
     @classmethod
     async def _request(
         cls,
         session: aiohttp.ClientSession,
         plan: _RequestPlan,
+        *,
+        include_metadata: bool = False,
     ) -> Any:
         if plan.request_timeout:
             async with asyncio.timeout(plan.request_timeout):
@@ -559,16 +592,24 @@ class AsyncFetcher:
                         response,
                         json=plan.response_json,
                         delay=plan.response_delay,
+                        include_metadata=include_metadata,
                     )
 
         async with session.request(plan.method, plan.url, **plan.request_kwargs) as response:
-            return await cls._read_response(response, json=plan.response_json, delay=plan.response_delay)
+            return await cls._read_response(
+                response,
+                json=plan.response_json,
+                delay=plan.response_delay,
+                include_metadata=include_metadata,
+            )
 
     @classmethod
     async def _execute_request(
         cls,
         plan: _RequestPlan,
         session: aiohttp.ClientSession | None = None,
+        *,
+        include_metadata: bool = False,
     ) -> Any:
         owns_session = session is None
         if owns_session:
@@ -582,7 +623,7 @@ class AsyncFetcher:
         assert session is not None
 
         try:
-            return await cls._request(session, plan)
+            return await cls._request(session, plan, include_metadata=include_metadata)
         finally:
             if owns_session:
                 await session.close()
@@ -631,6 +672,7 @@ class AsyncFetcher:
         json_body: dict[str, Any] | None = None,
         *,
         response_delay: int | None = None,
+        include_metadata: bool = False,
     ):
         # By default, timeout is 5 minutes, changed to 12-minutes
         # results are well worth the wait
@@ -646,9 +688,9 @@ class AsyncFetcher:
                 json_body=json_body,
                 response_delay=response_delay,
             )
-            return await cls._execute_request(plan)
+            return await cls._execute_request(plan, include_metadata=include_metadata)
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
-            return ''
+            return None if include_metadata else ''
 
     @classmethod
     async def fetch(
@@ -666,11 +708,13 @@ class AsyncFetcher:
         *,
         response_delay: int | None = None,
         use_system_ssl: bool = False,
+        include_metadata: bool = False,
     ) -> Any:
         """Generic HTTP request helper.
         - If a session is not provided, one will be created and closed automatically.
         - Supports optional headers, method selection, proxy, ssl verification, redirects and timeout.
         - Returns response text or json depending on `json` flag.
+        - With `include_metadata`, returns `FetcherResponse` or `None` on transport failure.
         """
         if use_system_ssl and verify is False:
             raise ValueError('use_system_ssl cannot be combined with verify=False')
@@ -688,9 +732,9 @@ class AsyncFetcher:
                 response_delay=response_delay,
                 use_system_ssl=use_system_ssl,
             )
-            return await cls._execute_request(plan, session)
+            return await cls._execute_request(plan, session, include_metadata=include_metadata)
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
-            return ''
+            return None if include_metadata else ''
 
     @staticmethod
     async def takeover_fetch(session, url: str, proxy: str | None = None) -> tuple[Any, Any] | str:
