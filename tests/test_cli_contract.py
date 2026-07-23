@@ -5,13 +5,15 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
 from importlib.metadata import distribution
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
 from theHarvester import __main__ as harvester_main
 from theHarvester.lib.core import Core
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.parametrize(
@@ -63,7 +65,7 @@ class FakeStashManager:
 
 class FakeSearch:
     source = ''
-    processed: list[str] = []
+    processed: ClassVar[list[str]] = []
 
     def __init__(self, word: str, *_args: Any) -> None:
         self.word = word
@@ -87,7 +89,7 @@ class FakeCrtshSearch(FakeSearch):
 
 
 @pytest.mark.asyncio
-async def test_all_runs_through_parser_providers_and_reports(
+async def test_all_runs_representative_providers_through_reports(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

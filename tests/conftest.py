@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-
 NETWORK_GUARD = pytest.StashKey[pytest.MonkeyPatch]()
 
 _getaddrinfo = socket.getaddrinfo
@@ -19,7 +18,7 @@ _connect_ex = socket.socket.connect_ex
 _sendto = socket.socket.sendto
 
 _ERROR = (
-    'External network access is disabled in tests. '
+    'External networking through Python socket APIs is disabled in routine tests. '
     'Mock the boundary or mark the test with @pytest.mark.live_network and pass '
     '--run-live-network -m live_network.'
 )
