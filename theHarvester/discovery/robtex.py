@@ -4,6 +4,7 @@ from types import ModuleType
 import aiohttp
 
 from theHarvester.lib.core import AsyncFetcher, Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 json: ModuleType = _stdlib_json
 try:
@@ -65,19 +66,19 @@ class SearchRobtex:
                     # Get the hostname from rrdata field for different record types
                     rrdata = record.get('rrdata', '')
                     rrtype = record.get('rrtype', '')
-                    rrname = record.get('rrname', '')
+                    rrname = normalize_scoped_hostname(record.get('rrname', ''), self.word)
 
                     # Add the original domain name
-                    if rrname and rrname.endswith(self.word):
+                    if rrname:
                         self.totalhosts.add(rrname)
 
                     # For CNAME records, the rrdata contains hostnames
                     if rrtype == 'CNAME' and rrdata:
-                        if rrdata.endswith(self.word) or f'.{self.word}' in rrdata:
-                            self.totalhosts.add(rrdata.rstrip('.'))
+                        if cname := normalize_scoped_hostname(rrdata, self.word):
+                            self.totalhosts.add(cname)
 
                     # For A records, we can get IPs
-                    if rrtype == 'A' and rrdata:
+                    if rrname and rrtype == 'A' and rrdata:
                         try:
                             # Validate it's an IP
                             parts = rrdata.split('.')

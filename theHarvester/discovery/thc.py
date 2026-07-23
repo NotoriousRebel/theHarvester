@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 
 from theHarvester.lib.core import Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 
 class SearchThc:
@@ -38,8 +39,7 @@ class SearchThc:
                         text = await response.text()
                         if text:
                             for line in text.splitlines():
-                                hostname = line.strip().lower()
-                                if hostname and self.word.lower() in hostname:
+                                if hostname := normalize_scoped_hostname(line, self.word):
                                     self.results.add(hostname)
                         return
 

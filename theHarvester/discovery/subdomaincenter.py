@@ -1,4 +1,5 @@
 from theHarvester.lib.core import AsyncFetcher, Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 
 class SubdomainCenter:
@@ -13,8 +14,14 @@ class SubdomainCenter:
         try:
             current_url = f'{self.server}{self.word}'
             resp = await AsyncFetcher.fetch_all([current_url], headers=headers, proxy=self.proxy, json=True)
-            self.results = resp[0]
-            self.results = {sub[4:] if sub[:4] == 'www.' and sub[4:] else sub for sub in self.results}
+            payload = resp[0] if resp else []
+            if not isinstance(payload, list):
+                return
+            for subdomain in payload:
+                if not isinstance(subdomain, str) or not subdomain:
+                    continue
+                if normalized := normalize_scoped_hostname(subdomain, self.word):
+                    self.results.add(normalized)
         except Exception as e:
             print(f'An exception has occurred in SubdomainCenter on : {e}')
 

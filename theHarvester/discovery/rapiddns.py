@@ -1,7 +1,10 @@
+from ipaddress import ip_address
+
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 from theHarvester.lib.core import AsyncFetcher, Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 
 class SearchRapidDns:
@@ -34,13 +37,17 @@ class SearchRapidDns:
                         continue
                     cells = row.find_all('td')
                     if len(cells) > 0:
-                        # sanity check
-                        subdomain = str(cells[0].get_text())
-                        if cells[-1].get_text() == 'CNAME':
-                            self.total_results.append(f'{subdomain}')
-                        else:
-                            self.total_results.append(f'{subdomain}:{str(cells[1].get_text()).strip()}')
-                self.total_results = list({domain for domain in self.total_results})
+                        subdomain = normalize_scoped_hostname(cells[0].get_text(), self.word)
+                        if subdomain:
+                            if cells[-1].get_text().strip() == 'CNAME':
+                                self.total_results.append(subdomain)
+                            elif len(cells) > 1:
+                                address = str(cells[1].get_text()).strip()
+                                try:
+                                    self.total_results.append(f'{subdomain}:{ip_address(address)}')
+                                except ValueError:
+                                    continue
+                self.total_results = sorted(set(self.total_results))
         except Exception as e:
             print(f'An exception has occurred: {e!s}')
 

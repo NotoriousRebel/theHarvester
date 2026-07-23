@@ -1,7 +1,9 @@
 import json as _stdlib_json
+from ipaddress import ip_address
 from types import ModuleType
 
 from theHarvester.lib.core import AsyncFetcher, Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 json: ModuleType = _stdlib_json
 try:
@@ -64,22 +66,23 @@ class SearchThreatcrowd:
                         for subdomain in subdomains:
                             if isinstance(subdomain, str) and subdomain.strip():
                                 # ThreatCrowd returns full subdomains, not relative ones
-                                clean_subdomain = subdomain.strip().lower()
-                                if clean_subdomain.endswith(f'.{self.word}') or clean_subdomain == self.word:
+                                if clean_subdomain := normalize_scoped_hostname(subdomain, self.word):
                                     self.totalhosts.add(clean_subdomain)
 
                     # Extract IPs if available (from resolutions)
                     resolutions = data.get('resolutions', [])
                     if isinstance(resolutions, list):
                         for resolution in resolutions:
+                            value = ''
                             if isinstance(resolution, dict):
-                                ip = resolution.get('ip_address', '')
-                                if ip and ip.strip():
-                                    self.totalips.add(ip.strip())
+                                value = resolution.get('ip_address', '')
                             elif isinstance(resolution, str):
-                                # Sometimes IPs are directly in the list
-                                if resolution.strip():
-                                    self.totalips.add(resolution.strip())
+                                value = resolution
+                            if isinstance(value, str) and value.strip():
+                                try:
+                                    self.totalips.add(str(ip_address(value.strip())))
+                                except ValueError:
+                                    continue
 
             except Exception as e:
                 print(f'Failed to parse ThreatCrowd response: {e}')

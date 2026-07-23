@@ -1,7 +1,8 @@
-import re
+from ipaddress import ip_address
 from typing import Any
 
 from theHarvester.lib.core import AsyncFetcher
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 
 class SearchOtx:
@@ -34,16 +35,19 @@ class SearchOtx:
             return
 
         try:
-            self.totalhosts = {host['hostname'] for host in passive if isinstance(host, dict) and 'hostname' in host}
-            # filter out ips that are just called NXDOMAIN and ensure they look like IPv4
-            self.totalips = {
-                ip['address']
-                for ip in passive
-                if isinstance(ip, dict)
-                and (addr := ip.get('address'))
-                and isinstance(addr, str)
-                and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', addr)
-            }
+            for record in passive:
+                if not isinstance(record, dict):
+                    continue
+                hostname = record.get('hostname')
+                normalized_hostname = normalize_scoped_hostname(hostname, self.word)
+                if normalized_hostname:
+                    self.totalhosts.add(normalized_hostname)
+                address = record.get('address')
+                if normalized_hostname and isinstance(address, str):
+                    try:
+                        self.totalips.add(str(ip_address(address.strip())))
+                    except ValueError:
+                        continue
         except (KeyError, TypeError, ValueError):
             self.totalhosts = set()
             self.totalips = set()
