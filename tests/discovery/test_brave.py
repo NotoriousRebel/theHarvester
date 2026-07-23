@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from theHarvester.discovery import bravesearch
+from theHarvester.discovery.constants import MissingKey
 
 
 def _result(index: int) -> dict[str, str]:
@@ -32,6 +33,63 @@ def no_brave_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(bravesearch.asyncio, 'sleep', no_sleep)
+
+
+def test_brave_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bravesearch.Core, 'brave_key', staticmethod(lambda: ''))
+
+    with pytest.raises(MissingKey, match='Brave Search'):
+        bravesearch.SearchBrave('example.com', 10)
+
+
+@pytest.mark.asyncio
+async def test_brave_normalizes_in_scope_evidence_and_handles_error_response(
+    monkeypatch: pytest.MonkeyPatch,
+    brave_key: None,
+) -> None:
+    responses = iter(
+        [
+            _response(
+                [
+                    {
+                        'title': 'Contact Admin@Example.COM.',
+                        'description': 'Ignore outsider@notexample.com and api.notexample.com',
+                        'url': 'https://Blog.Example.COM./contact',
+                    }
+                ],
+                more=False,
+            ),
+            {'error': {'message': 'Access denied', 'code': 'forbidden'}},
+        ]
+    )
+
+    async def fake_fetch(*, url: str, **_kwargs: Any) -> dict[str, Any]:
+        return next(responses)
+
+    monkeypatch.setattr(bravesearch.AsyncFetcher, 'fetch', fake_fetch)
+    search = bravesearch.SearchBrave('example.com', 10)
+    await search.process(proxy=True)
+
+    assert await search.get_emails() == {'admin@example.com'}
+    assert await search.get_hostnames() == ['blog.example.com', 'example.com']
+
+
+@pytest.mark.parametrize('response', [None, []], ids=['empty', 'malformed'])
+@pytest.mark.asyncio
+async def test_brave_unusable_response_returns_no_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    brave_key: None,
+    response: list[Any] | None,
+) -> None:
+    async def fake_fetch(*, url: str, **_kwargs: Any) -> list[Any] | None:
+        return response
+
+    monkeypatch.setattr(bravesearch.AsyncFetcher, 'fetch', fake_fetch)
+    search = bravesearch.SearchBrave('example.com', 10)
+    await search.process()
+
+    assert await search.get_emails() == set()
+    assert await search.get_hostnames() == []
 
 
 @pytest.mark.asyncio

@@ -74,9 +74,9 @@ class TestMojeekSearch:
                     'response': {
                         'results': [
                             {
-                                'url': 'https:\\/\\/blog.example.com\\/contact',
-                                'title': 'Contact admin@example.com',
-                                'desc': 'API docs at api.example.com',
+                                'url': 'https:\\/\\/Blog.Example.COM.\\/contact',
+                                'title': 'Contact Admin@Example.COM.',
+                                'desc': 'API docs at api.example.com; ignore outsider@notexample.com',
                             }
                         ]
                     }
