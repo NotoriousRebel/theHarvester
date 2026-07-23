@@ -276,10 +276,10 @@ class Core:
     @staticmethod
     def get_supportedengines() -> list[str]:
         """Returns a list of supported search engines."""
+        # Bitbucket code search requires workspace scope, and its current API is scheduled for removal.
         return [
             'baidu',
             'bevigil',
-            'bitbucket',
             'bufferoverun',
             'builtwith',
             'brave',

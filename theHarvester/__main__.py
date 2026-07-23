@@ -18,7 +18,6 @@ from theHarvester.discovery import (
     api_endpoints,
     baidusearch,
     bevigil,
-    bitbucket,
     bravesearch,
     bufferoverun,
     builtwith,
@@ -82,6 +81,17 @@ from theHarvester.screenshot.screenshot import ScreenShotter
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+
+UNADVERTISED_SOURCES = frozenset(
+    {
+        'linkedin',
+        'linkedin_links',
+        'netcraft',
+        'omnisint',
+        'sublist3r',
+        'zoomeyeapi',
+    }
+)
 
 
 def sanitize_for_xml(text: str) -> str:
@@ -198,11 +208,7 @@ async def start(rest_args: argparse.Namespace | None = None):
     parser.add_argument(
         '-b',
         '--source',
-        help="""baidu, bevigil, bitbucket, brave, bufferoverun,
-                            builtwith, censys, certspotter, chaos, commoncrawl, criminalip, crtsh, dehashed, dnsdumpster, duckduckgo, dymo, fofa, fullhunt, github-code,
-                            gitlab, hackertarget, haveibeenpwned, hudsonrock, hunter, hunterhow, intelx, leakix, leaklookup, mojeek, netlas, onyphe, otx, pentesttools,
-                            projectdiscovery, rapiddns, robtex, rocketreach, securityscorecard, securityTrails, sherlockeye, shodan, shodanInternetDB, subdomaincenter,
-                            subdomainfinderc99, thc, threatcrowd, tomba, urlscan, venacus, virustotal, waybackarchive, whoisxml, windvane, yahoo, zoomeye""",
+        help=', '.join(source for source in Core.get_supportedengines() if source not in UNADVERTISED_SOURCES),
     )
 
     # determines if the filename is coming from rest api or user
@@ -461,23 +467,6 @@ async def start(rest_args: argparse.Namespace | None = None):
                         )
                     except Exception as e:
                         show_default_error_message(engineitem, word, error=e)
-
-                elif engineitem == 'bitbucket':
-                    try:
-                        bitbucket_search = bitbucket.SearchBitBucket(word, limit)
-                        stor_lst.append(
-                            store(
-                                bitbucket_search,
-                                engineitem,
-                                store_host=True,
-                                store_emails=True,
-                            )
-                        )
-                    except Exception as ex:
-                        if isinstance(ex, MissingKey):
-                            print(MissingKey('Bitbucket'))
-                        else:
-                            show_default_error_message(engineitem, word, ex)
 
                 elif engineitem == 'brave':
                     try:

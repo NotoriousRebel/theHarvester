@@ -52,6 +52,27 @@ def test_console_script_help_contract(script: str, target: str, flags: tuple[str
         assert flag in result.stdout
 
 
+def test_bitbucket_is_not_advertised_without_a_valid_domain_search_api() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            '-c',
+            'from theHarvester.theHarvester import main; main()',
+            '--help',
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert 'bitbucket' not in Core.get_supportedengines()
+    assert 'bitbucket' not in result.stdout.lower()
+    for source in ('linkedin', 'linkedin_links', 'netcraft', 'omnisint', 'sublist3r', 'zoomeyeapi'):
+        assert source not in result.stdout
+
+
 class FakeStashManager:
     async def do_init(self) -> None:
         return None
