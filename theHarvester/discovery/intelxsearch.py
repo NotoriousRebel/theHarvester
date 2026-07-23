@@ -6,6 +6,7 @@ import aiohttp
 
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib.core import Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 from theHarvester.parsers import intelxparser
 
 
@@ -13,7 +14,7 @@ class SearchIntelx:
     def __init__(self, word) -> None:
         self.word = word
         self.key = Core.intelx_key()
-        if self.key is None:
+        if not isinstance(self.key, str) or not self.key.strip():
             raise MissingKey('Intelx')
         self.database = 'https://2.intelx.io'
         self.results: dict[str, Any] = {}
@@ -65,22 +66,34 @@ class SearchIntelx:
         self.proxy = proxy
         await self.do_search()
         intelx_parser = intelxparser.Parser()
-        self.info = await intelx_parser.parse_dictionaries(self.results)
+        raw_emails, raw_selectors = await intelx_parser.parse_dictionaries(self.results)
+        emails: set[str] = set()
+        interesting_urls: set[str] = set()
+        hostnames: set[str] = set()
+
+        for email in raw_emails:
+            if email.count('@') != 1:
+                continue
+            local_part, domain = email.lower().rsplit('@', maxsplit=1)
+            if local_part and (normalized_domain := normalize_scoped_hostname(domain, self.word)):
+                emails.add(f'{local_part}@{normalized_domain}')
+
+        for selector in raw_selectors:
+            try:
+                parsed = urlparse(selector if '://' in selector else f'//{selector}')
+            except ValueError:
+                continue
+            interesting_urls.add(selector)
+            if normalized_hostname := normalize_scoped_hostname(parsed.hostname, self.word):
+                hostnames.add(normalized_hostname)
+
+        self.info = sorted(emails), sorted(interesting_urls), sorted(hostnames)
 
     async def get_emails(self) -> list[str]:
         return self.info[0]
 
-    async def get_interestingurls(self) -> tuple[list[str], list[str]]:
-        urls = self.info[1]
-        subdomains = []
+    async def get_hostnames(self) -> list[str]:
+        return self.info[2]
 
-        for url in urls:
-            try:
-                parsed = urlparse(url)
-                domain = parsed.netloc
-                if domain.count('.') > 1 and self.word in domain:
-                    subdomains.append(domain)
-            except Exception:
-                continue
-
-        return urls, list(set(subdomains))
+    async def get_interestingurls(self) -> list[str]:
+        return self.info[1]

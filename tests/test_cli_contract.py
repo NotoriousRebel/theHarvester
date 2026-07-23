@@ -109,6 +109,13 @@ class FakeCrtshSearch(FakeSearch):
     source = 'crtsh'
 
 
+class FakeIntelxSearch(FakeSearch):
+    source = 'intelx'
+
+    async def get_interestingurls(self) -> list[str]:
+        return [f'https://api.{self.word}/status']
+
+
 @pytest.mark.asyncio
 async def test_all_runs_representative_providers_through_reports(
     monkeypatch: pytest.MonkeyPatch,
@@ -152,3 +159,26 @@ async def test_all_runs_representative_providers_through_reports(
     assert set(report['hosts']) == {'baidu.example.com', 'crtsh.example.com'}
     assert report['emails'] == ['analyst@example.com']
     assert report['shodan'] == []
+
+
+@pytest.mark.asyncio
+async def test_intelx_hostnames_flow_through_the_normal_report_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    report_base = tmp_path / 'intelx'
+    monkeypatch.setattr(Core, 'get_supportedengines', staticmethod(lambda: ['intelx']))
+    monkeypatch.setattr(harvester_main.stash, 'StashManager', FakeStashManager)
+    monkeypatch.setattr(harvester_main.intelxsearch, 'SearchIntelx', FakeIntelxSearch)
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        ['theHarvester', '-d', 'example.com', '-b', 'intelx', '-f', str(report_base)],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        await harvester_main.start()
+
+    assert exit_info.value.code == 0
+    report = json.loads(report_base.with_suffix('.json').read_text(encoding='utf-8'))
+    assert report['hosts'] == ['intelx.example.com']
