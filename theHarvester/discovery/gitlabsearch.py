@@ -1,8 +1,10 @@
 import json as _stdlib_json
 import re
 from types import ModuleType
+from urllib.parse import quote
 
 from theHarvester.lib.core import AsyncFetcher, Core
+from theHarvester.lib.hostnames import normalize_scoped_hostname
 
 json: ModuleType = _stdlib_json
 try:
@@ -16,7 +18,7 @@ except Exception:
 
 
 class SearchGitlab:
-    """Class uses GitLab API to search for domain references in projects and code"""
+    """Search public GitLab project metadata, README files, and user profiles."""
 
     def __init__(self, word) -> None:
         self.word = word
@@ -25,50 +27,43 @@ class SearchGitlab:
         self.totalurls: set = set()
         self.proxy = False
         self.hostname = 'https://gitlab.com'
+        self.project_limit = 20
+        self.user_limit = 10
 
     @staticmethod
-    def _safe_parse_json(payload: object) -> dict:
-        # If already a dict, return it; if string, try parse; else return {}
-        if isinstance(payload, dict):
+    def _safe_parse_json(payload: object) -> dict | list:
+        if isinstance(payload, (dict, list)):
             return payload
         if isinstance(payload, str):
             try:
-                return json.loads(payload)
+                parsed = json.loads(payload)
+                return parsed if isinstance(parsed, (dict, list)) else {}
             except Exception:
                 return {}
         return {}
 
-    def _extract_domains_from_text(self, text: str) -> set:
+    def _extract_domains_from_text(self, text: str) -> set[str]:
         """Extract domain names from text that match our target domain"""
         domains: set[str] = set()
         if not text:
             return domains
 
-        # Look for subdomains of our target domain
-        pattern = rf'[a-zA-Z0-9.-]*\.{re.escape(self.word)}'
-        matches = re.findall(pattern, text, re.IGNORECASE)
-
-        for match in matches:
-            # Clean up the match
-            domain = match.lower().strip('.')
-            if domain.endswith(self.word) and domain != self.word:
+        for candidate in re.findall(r'[a-zA-Z0-9.-]+', text):
+            if domain := normalize_scoped_hostname(candidate.strip('.'), self.word):
                 domains.add(domain)
 
         return domains
 
-    def _extract_emails_from_text(self, text: str) -> set:
+    def _extract_emails_from_text(self, text: str) -> set[str]:
         """Extract email addresses that match our target domain"""
         emails: set[str] = set()
         if not text:
             return emails
 
-        email_pattern = rf'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]*\.?{re.escape(self.word)}'
-        matches = re.findall(email_pattern, text, re.IGNORECASE)
-
-        for match in matches:
-            email = match.lower()
-            if self.word in email:
-                emails.add(email)
+        for candidate in re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+', text):
+            local_part, domain = candidate.lower().split('@', maxsplit=1)
+            if normalized_domain := normalize_scoped_hostname(domain, self.word):
+                emails.add(f'{local_part}@{normalized_domain}')
 
         return emails
 
@@ -82,7 +77,7 @@ class SearchGitlab:
 
             for term in search_terms:
                 # Search projects
-                projects_url = f'{self.hostname}/api/v4/projects?search={term}&per_page=100'
+                projects_url = f'{self.hostname}/api/v4/projects?search={term}&per_page={self.project_limit}'
                 response = await AsyncFetcher.fetch_all([projects_url], headers=headers, proxy=self.proxy)
 
                 if not response or not isinstance(response, list) or not response[0]:
@@ -93,29 +88,33 @@ class SearchGitlab:
                     if not isinstance(projects, list):
                         continue
 
-                    for project in projects[:20]:  # Limit to first 20 projects
+                    for project in projects[: self.project_limit]:
                         if not isinstance(project, dict):
                             continue
 
                         # Extract information from project metadata
-                        description = project.get('description', '') or ''
-                        name = project.get('name', '') or ''
-                        path = project.get('path_with_namespace', '') or ''
-                        web_url = project.get('web_url', '') or ''
+                        description = project.get('description')
+                        name = project.get('name')
+                        path = project.get('path_with_namespace')
+                        web_url = project.get('web_url')
 
                         # Look for domains in description and name
-                        all_text = f'{description} {name} {path}'
+                        all_text = ' '.join(value for value in (description, name, path) if isinstance(value, str))
                         self.totalhosts.update(self._extract_domains_from_text(all_text))
                         self.totalemails.update(self._extract_emails_from_text(all_text))
 
                         # Add the web URL if it contains our domain
-                        if web_url and self.word in web_url:
+                        if isinstance(web_url, str) and self.word in web_url:
                             self.totalurls.add(web_url)
 
                         # Try to get README content for more detailed search
                         project_id = project.get('id')
-                        if project_id:
-                            readme_url = f'{self.hostname}/api/v4/projects/{project_id}/repository/files/README.md/raw?ref=main'
+                        default_branch = project.get('default_branch')
+                        if project_id and isinstance(default_branch, str) and default_branch:
+                            readme_url = (
+                                f'{self.hostname}/api/v4/projects/{quote(str(project_id), safe="")}'
+                                f'/repository/files/README.md/raw?ref={quote(default_branch, safe="")}'
+                            )
                             try:
                                 readme_response = await AsyncFetcher.fetch_all([readme_url], headers=headers, proxy=self.proxy)
                                 if readme_response and readme_response[0]:
@@ -139,7 +138,7 @@ class SearchGitlab:
             headers = {'User-agent': Core.get_user_agent()}
 
             # Search for users mentioning our domain
-            users_url = f'{self.hostname}/api/v4/users?search={self.word}&per_page=50'
+            users_url = f'{self.hostname}/api/v4/users?search={self.word}&per_page={self.user_limit}'
             response = await AsyncFetcher.fetch_all([users_url], headers=headers, proxy=self.proxy)
 
             if not response or not isinstance(response, list) or not response[0]:
@@ -150,32 +149,32 @@ class SearchGitlab:
                 if not isinstance(users, list):
                     return
 
-                for user in users[:10]:  # Limit to first 10 users
+                for user in users[: self.user_limit]:
                     if not isinstance(user, dict):
                         continue
 
                     # Extract information from user metadata
-                    name = user.get('name', '') or ''
-                    username = user.get('username', '') or ''
-                    bio = user.get('bio', '') or ''
-                    web_url = user.get('web_url', '') or ''
-                    website_url = user.get('website_url', '') or ''
-                    public_email = user.get('public_email', '') or ''
+                    name = user.get('name')
+                    username = user.get('username')
+                    bio = user.get('bio')
+                    web_url = user.get('web_url')
+                    website_url = user.get('website_url')
+                    public_email = user.get('public_email')
 
                     # Look for domains in user info
-                    all_text = f'{name} {username} {bio} {website_url}'
+                    all_text = ' '.join(value for value in (name, username, bio, website_url) if isinstance(value, str))
                     self.totalhosts.update(self._extract_domains_from_text(all_text))
 
                     # Check email
-                    if public_email and self.word in public_email:
-                        self.totalemails.add(public_email)
+                    if isinstance(public_email, str):
+                        self.totalemails.update(self._extract_emails_from_text(public_email))
 
                     # Check website URL
-                    if website_url and self.word in website_url:
+                    if isinstance(website_url, str) and self.word in website_url:
                         self.totalurls.add(website_url)
 
                     # Add user profile URL if relevant
-                    if web_url:
+                    if isinstance(web_url, str) and web_url:
                         self.totalurls.add(web_url)
 
             except Exception as e:
