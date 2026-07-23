@@ -49,7 +49,7 @@ class SearchRapidDns:
                                     continue
                 self.total_results = sorted(set(self.total_results))
         except Exception as e:
-            print(f'An exception has occurred: {e!s}')
+            print(f'RapidDNS error: {e!s}')
 
     async def process(self, proxy: bool = False) -> None:
         self.proxy = proxy

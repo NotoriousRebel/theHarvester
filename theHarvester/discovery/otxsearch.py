@@ -16,9 +16,10 @@ class SearchOtx:
         url = f'https://otx.alienvault.com/api/v1/indicators/domain/{self.word}/passive_dns'
         try:
             response_list = await AsyncFetcher.fetch_all([url], json=True, proxy=self.proxy)
-        except (OSError, RuntimeError, ValueError):
+        except (OSError, RuntimeError, ValueError) as error:
             self.totalhosts = set()
             self.totalips = set()
+            print(f'OTX request failed: {error}')
             return
 
         # Expect a list with one JSON-decoded dict

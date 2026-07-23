@@ -7,6 +7,8 @@ def _patch_fetch(monkeypatch, payload):
     import theHarvester.lib.core as core_module
 
     async def fake_fetch_all(urls, headers=None, proxy=False, json=False):
+        assert urls == ['https://crt.sh/?q=%25.example.com&exclude=expired&deduplicate=Y&output=json']
+        assert json is True
         return [payload]
 
     monkeypatch.setattr(core_module.AsyncFetcher, 'fetch_all', staticmethod(fake_fetch_all), raising=True)
@@ -21,7 +23,14 @@ class TestCrtshSearch:
 
     @pytest.mark.asyncio
     async def test_process_collects_hostnames(self, monkeypatch):
-        _patch_fetch(monkeypatch, [{'name_value': 'www.example.com'}, {'name_value': 'mail.example.com'}])
+        _patch_fetch(
+            monkeypatch,
+            [
+                {'name_value': 'WWW.EXAMPLE.COM.'},
+                {'name_value': 'mail.example.com'},
+                {'name_value': 'outside.test'},
+            ],
+        )
         search = crtsh.SearchCrtsh('example.com')
         await search.process(proxy=True)
         assert search.proxy is True
@@ -67,6 +76,19 @@ class TestCrtshSearch:
         search = crtsh.SearchCrtsh('example.com')
         await search.process()
         assert await search.get_hostnames() == []
+
+    @pytest.mark.asyncio
+    async def test_provider_failures_are_attributed(self, monkeypatch, capsys):
+        import theHarvester.lib.core as core_module
+
+        async def failed_fetch(*_args, **_kwargs):
+            raise OSError('provider unavailable')
+
+        monkeypatch.setattr(core_module.AsyncFetcher, 'fetch_all', staticmethod(failed_fetch), raising=True)
+        search = crtsh.SearchCrtsh('example.com')
+        await search.process()
+        assert await search.get_hostnames() == []
+        assert 'crt.sh' in capsys.readouterr().out
 
 
 class TestCrtshIntegration:

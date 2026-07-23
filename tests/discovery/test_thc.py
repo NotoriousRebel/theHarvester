@@ -10,6 +10,7 @@ THC provides multiple endpoints:
 
 API Documentation: https://ip.thc.org/docs/
 """
+
 from types import TracebackType
 from typing import Any, Self
 from urllib.parse import parse_qs, urlparse
@@ -22,11 +23,10 @@ from theHarvester.lib.core import Core
 
 
 class FakeResponse:
-    status = 200
-    headers: dict[str, str] = {}
-
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, status: int = 200, headers: dict[str, str] | None = None) -> None:
         self._text = text
+        self.status = status
+        self.headers = headers or {}
 
     async def __aenter__(self) -> Self:
         return self
@@ -60,7 +60,7 @@ class FakeSession:
 
     def get(self, url: str) -> FakeResponse:
         domain = parse_qs(urlparse(url).query).get('domain', ['example.com'])[0]
-        return FakeResponse(f'WWW.{domain}\napi.{domain}\napi.{domain}\n')
+        return FakeResponse(f'WWW.{domain}\napi.{domain}\napi.{domain}\nnot{domain}\n')
 
 
 @pytest.fixture(autouse=True)
@@ -134,7 +134,7 @@ class TestThcSubdomainSearch:
         search = thc.SearchThc(self.domain())
         await search.process()
         result = await search.get_hostnames()
-        assert len(result) > 0, 'Should find at least one subdomain for example.com'
+        assert result == {'www.example.com', 'api.example.com'}
 
     @pytest.mark.asyncio
     async def test_search_results_contain_target_domain(self) -> None:
@@ -153,6 +153,81 @@ class TestThcSubdomainSearch:
         result = await search.get_hostnames()
         result_list = list(result)
         assert len(result_list) == len(set(result_list))
+
+    @pytest.mark.asyncio
+    async def test_request_uses_declared_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        requested_urls: list[str] = []
+
+        class CaptureSession(FakeSession):
+            def get(self, url: str) -> FakeResponse:
+                requested_urls.append(url)
+                return FakeResponse('')
+
+        monkeypatch.setattr(thc.aiohttp, 'ClientSession', CaptureSession)
+        search = thc.SearchThc(self.domain())
+        await search.process()
+
+        assert requested_urls == [
+            'https://ip.thc.org/api/v1/subdomains/download?domain=example.com&limit=10000&hide_header=true'
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_is_attributed_and_retried(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        responses = iter(
+            [
+                FakeResponse('', status=429, headers={'x-ratelimit-remaining': '0'}),
+                FakeResponse('api.example.com\n'),
+            ]
+        )
+
+        class RateLimitSession(FakeSession):
+            def get(self, _url: str) -> FakeResponse:
+                return next(responses)
+
+        delays: list[int] = []
+
+        async def fake_sleep(seconds: int) -> None:
+            delays.append(seconds)
+
+        monkeypatch.setattr(thc.aiohttp, 'ClientSession', RateLimitSession)
+        monkeypatch.setattr(thc.asyncio, 'sleep', fake_sleep)
+        search = thc.SearchThc(self.domain())
+        await search.process()
+
+        assert await search.get_hostnames() == {'api.example.com'}
+        assert delays == [2]
+        assert 'THC rate limit hit' in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('response', 'message'),
+        [
+            (FakeResponse('outside.test\nnotexample.com\n'), ''),
+            (FakeResponse('', status=503), 'THC returned status 503'),
+        ],
+    )
+    async def test_empty_and_error_responses_return_no_hostnames(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        response: FakeResponse,
+        message: str,
+    ) -> None:
+        class ResponseSession(FakeSession):
+            def get(self, _url: str) -> FakeResponse:
+                return response
+
+        monkeypatch.setattr(thc.aiohttp, 'ClientSession', ResponseSession)
+        search = thc.SearchThc(self.domain())
+        await search.process()
+
+        assert await search.get_hostnames() == set()
+        if message:
+            assert message in capsys.readouterr().out
 
 
 # =============================================================================
@@ -319,12 +394,14 @@ class TestThcIntegration:
     async def test_module_can_be_imported(self) -> None:
         """Verify that the module can be imported."""
         from theHarvester.discovery import thc as thc_module
+
         assert thc_module is not None
 
     @pytest.mark.asyncio
     async def test_search_class_exists(self) -> None:
         """Verify that SearchThc class exists."""
         from theHarvester.discovery import thc as thc_module
+
         assert hasattr(thc_module, 'SearchThc')
 
     @pytest.mark.asyncio

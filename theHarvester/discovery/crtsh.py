@@ -25,9 +25,9 @@ class SearchCrtsh:
         except IndexError:
             print('No response from crt.sh or malformed list.')
         except KeyError as ke:
-            print(f'Missing expected key in response: {ke}')
+            print(f'crt.sh response is missing an expected key: {ke}')
         except Exception as e:
-            print(f'Unexpected error: {e}')
+            print(f'crt.sh returned an unexpected error: {e}')
         return sorted(data)
 
     async def process(self, proxy: bool = False) -> None:
