@@ -199,6 +199,16 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         'dehashed', 'search_dehashed', 'SearchDehashed', family='breach-data', credentials=('api-key',), capabilities=('ips',)
     ),
     _source(
+        'dnsdb',
+        'dnsdb',
+        'SearchDNSDB',
+        family='passive-dns',
+        credentials=('api-key',),
+        pagination='provider-result-limit',
+        recursion='provider-descendants',
+        limits=('account-results-max',),
+    ),
+    _source(
         'dnsdumpster',
         'search_dnsdumpster',
         'SearchDNSDumpster',

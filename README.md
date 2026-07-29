@@ -85,6 +85,8 @@ Passive modules
 
 * dehashed: Take your data security to the next level is (https://dehashed.com)
 
+* dnsdb: Historical and near-real-time passive DNS data from DomainTools DNSDB (https://docs.domaintools.com/dnsdb/)
+
 * dnsdumpster: Domain research tool that can discover hosts related to a domain (https://dnsdumpster.com)
 
 * duckduckgo: DuckDuckGo search engine (https://duckduckgo.com)
@@ -175,6 +177,7 @@ Documentation to setup API keys can be found at - https://github.com/laramies/th
 * censys - 500 credits $100
 * criminalip - 100 free queries/month. 700k/month $59
 * dehashed - 500 credts $15, 5k credits $150
+* dnsdb - commercial API entitlement required
 * dnsdumpster - 50 free querries/day, $49
 * dymo - free tier available, paid plans for higher limits
 * fofa - query credits 10,000/month. 100k results/month $25

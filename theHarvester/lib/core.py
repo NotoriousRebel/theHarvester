@@ -62,6 +62,7 @@ class Core:
         'censys': ('id', 'secret'),
         'criminalip': ('key',),
         'dehashed': ('key',),
+        'dnsdb': ('key',),
         'dnsdumpster': ('key',),
         'dymo': ('key',),
         'fofa': ('key', 'email'),
@@ -150,6 +151,11 @@ class Core:
     @staticmethod
     def dehashed_key() -> str:
         return Core._api_key_value('dehashed')
+
+    @staticmethod
+    def dnsdb_key() -> str | None:
+        provider_keys = Core.api_keys().get('dnsdb')
+        return provider_keys.get('key') if isinstance(provider_keys, dict) else None
 
     @staticmethod
     def dnsdumpster_key() -> str:

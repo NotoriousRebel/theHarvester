@@ -77,6 +77,17 @@ def test_every_catalog_adapter_is_importable() -> None:
         assert source.recursion
 
 
+def test_dnsdb_is_a_passive_descendant_source() -> None:
+    source = next(source for source in SOURCE_CATALOG if source.name == 'dnsdb')
+
+    assert source.family == 'passive-dns'
+    assert source.credentials == ('api-key',)
+    assert source.capabilities == ('hostnames',)
+    assert source.activity is ActivityClass.PASSIVE
+    assert source.pagination == 'provider-result-limit'
+    assert source.recursion == 'provider-descendants'
+
+
 def test_catalog_adapter_and_capabilities_match_scheduler_branches() -> None:
     branches = _engine_branches()
     capability_keywords = {
