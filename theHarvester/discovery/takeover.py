@@ -88,9 +88,9 @@ class TakeOver:
             else:
                 return
         except IndexError:
-            print('Response was empty — possible network error or invalid URL.')
+            print('Response was empty: possible network error or invalid URL.')
         except ujson.JSONDecodeError:
-            print('Failed to parse JSON — cert fingerprints might be unavailable.')
+            print('Failed to parse JSON: cert fingerprints might be unavailable.')
         except KeyError as ke:
             print(f'Missing expected field in fingerprint: {ke}')
         except TypeError as te:
