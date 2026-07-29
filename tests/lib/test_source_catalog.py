@@ -77,6 +77,45 @@ def test_every_catalog_adapter_is_importable() -> None:
         assert source.recursion
 
 
+def test_catalog_recursion_matches_explicit_descendant_queries() -> None:
+    expected = {
+        'bevigil',
+        'brave',
+        'bufferoverun',
+        'certspotter',
+        'chaos',
+        'commoncrawl',
+        'criminalip',
+        'crtsh',
+        'dnsdumpster',
+        'fofa',
+        'fullhunt',
+        'hackertarget',
+        'hunterhow',
+        'leakix',
+        'netlas',
+        'otx',
+        'pentesttools',
+        'projectdiscovery',
+        'rapiddns',
+        'robtex',
+        'securitytrails',
+        'subdomaincenter',
+        'subdomainfinderc99',
+        'thc',
+        'threatcrowd',
+        'urlscan',
+        'virustotal',
+        'waybackarchive',
+        'whoisxml',
+        'windvane',
+        'zoomeye',
+    }
+
+    assert {source.name for source in SOURCE_CATALOG if source.recursion == 'provider-descendants'} == expected
+    assert {source.recursion for source in SOURCE_CATALOG} <= {'none', 'provider-descendants'}
+
+
 def test_catalog_adapter_and_capabilities_match_scheduler_branches() -> None:
     branches = _engine_branches()
     capability_keywords = {

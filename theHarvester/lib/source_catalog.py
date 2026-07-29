@@ -38,6 +38,7 @@ class SourceSpec:
     capabilities: tuple[str, ...]
     activity: ActivityClass = ActivityClass.PASSIVE
     pagination: str = 'adapter-managed'
+    # Provider descendants are requested by the adapter itself; active DNS recursion is a separate P1 action.
     recursion: str = 'none'
     declared_limits: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
@@ -129,6 +130,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='bevigil',
         credentials=('api-key',),
         capabilities=('hostnames', 'interesting-urls'),
+        recursion='provider-descendants',
     ),
     _source(
         'bitbucket',
@@ -146,6 +148,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='web-search',
         credentials=('api-key',),
         capabilities=('hostnames', 'emails'),
+        recursion='provider-descendants',
         limits=_LIMIT,
     ),
     _source(
@@ -155,6 +158,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='passive-dns',
         credentials=('api-key',),
         capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
     ),
     _source(
         'builtwith',
@@ -179,12 +183,20 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         'SearchCertspoter',
         family='certificate-transparency',
         pagination='cursor-until-exhausted',
+        recursion='provider-descendants',
         limits=('maximum-pages-1000',),
     ),
     _source(
         'chaos', 'chaos', 'SearchChaos', family='projectdiscovery', credentials=('api-key',), recursion='provider-descendants'
     ),
-    _source('commoncrawl', 'commoncrawl', 'SearchCommoncrawl', family='web-archive', pagination='all-current-indexes'),
+    _source(
+        'commoncrawl',
+        'commoncrawl',
+        'SearchCommoncrawl',
+        family='web-archive',
+        pagination='all-current-indexes',
+        recursion='provider-descendants',
+    ),
     _source(
         'criminalip',
         'criminalip',
@@ -193,8 +205,15 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         credentials=('api-key',),
         capabilities=('hostnames', 'ips', 'asns'),
         activity=ActivityClass.DIRECT,
+        recursion='provider-descendants',
     ),
-    _source('crtsh', 'crtsh', 'SearchCrtsh', family='certificate-transparency'),
+    _source(
+        'crtsh',
+        'crtsh',
+        'SearchCrtsh',
+        family='certificate-transparency',
+        recursion='provider-descendants',
+    ),
     _source(
         'dehashed', 'search_dehashed', 'SearchDehashed', family='breach-data', credentials=('api-key',), capabilities=('ips',)
     ),
@@ -205,6 +224,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='dnsdumpster',
         credentials=('api-key',),
         capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
     ),
     _source(
         'duckduckgo',
@@ -216,9 +236,22 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
     ),
     _source('dymo', 'dymosearch', 'SearchDymo', family='dymo', credentials=('api-key',)),
     _source(
-        'fofa', 'fofa', 'SearchFofa', family='fofa', credentials=('api-key', 'account-email'), capabilities=('hostnames', 'ips')
+        'fofa',
+        'fofa',
+        'SearchFofa',
+        family='fofa',
+        credentials=('api-key', 'account-email'),
+        capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
     ),
-    _source('fullhunt', 'fullhuntsearch', 'SearchFullHunt', family='fullhunt', credentials=('api-key',)),
+    _source(
+        'fullhunt',
+        'fullhuntsearch',
+        'SearchFullHunt',
+        family='fullhunt',
+        credentials=('api-key',),
+        recursion='provider-descendants',
+    ),
     _source(
         'github-code',
         'githubcode',
@@ -236,6 +269,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='hackertarget',
         credentials=('api-key',),
         capabilities=('hostnames',),
+        recursion='provider-descendants',
     ),
     _source(
         'haveibeenpwned',
@@ -261,7 +295,14 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         capabilities=('hostnames', 'emails'),
         limits=_LIMIT,
     ),
-    _source('hunterhow', 'searchhunterhow', 'SearchHunterHow', family='hunterhow', credentials=('api-key',)),
+    _source(
+        'hunterhow',
+        'searchhunterhow',
+        'SearchHunterHow',
+        family='hunterhow',
+        credentials=('api-key',),
+        recursion='provider-descendants',
+    ),
     _source(
         'intelx',
         'intelxsearch',
@@ -277,6 +318,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='leakix',
         credentials=('api-key',),
         capabilities=('hostnames', 'emails'),
+        recursion='provider-descendants',
     ),
     _source(
         'leaklookup',
@@ -302,6 +344,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='netlas',
         credentials=('api-key',),
         capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
         limits=_LIMIT,
     ),
     _source(
@@ -312,7 +355,14 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         credentials=('api-key',),
         capabilities=('hostnames', 'ips', 'asns'),
     ),
-    _source('otx', 'otxsearch', 'SearchOtx', family='alienvault-otx', capabilities=('hostnames', 'ips')),
+    _source(
+        'otx',
+        'otxsearch',
+        'SearchOtx',
+        family='alienvault-otx',
+        capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
+    ),
     _source(
         'pentesttools',
         'pentesttools',
@@ -320,6 +370,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='pentesttools',
         credentials=('api-key',),
         activity=ActivityClass.DIRECT,
+        recursion='provider-descendants',
         limits=('provider-scan-budget',),
     ),
     _source(
@@ -330,8 +381,21 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         credentials=('api-key',),
         recursion='provider-descendants',
     ),
-    _source('rapiddns', 'rapiddns', 'SearchRapidDns', family='rapiddns'),
-    _source('robtex', 'robtex', 'SearchRobtex', family='robtex', capabilities=('hostnames', 'ips')),
+    _source(
+        'rapiddns',
+        'rapiddns',
+        'SearchRapidDns',
+        family='rapiddns',
+        recursion='provider-descendants',
+    ),
+    _source(
+        'robtex',
+        'robtex',
+        'SearchRobtex',
+        family='robtex',
+        capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
+    ),
     _source(
         'rocketreach',
         'rocketreach',
@@ -356,6 +420,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='securitytrails',
         credentials=('api-key',),
         capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
         aliases=('securityTrails',),
     ),
     _source(
@@ -376,15 +441,36 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         activity=ActivityClass.DNS,
         aliases=('shodanInternetDB',),
     ),
-    _source('subdomaincenter', 'subdomaincenter', 'SubdomainCenter', family='subdomaincenter'),
+    _source(
+        'subdomaincenter',
+        'subdomaincenter',
+        'SubdomainCenter',
+        family='subdomaincenter',
+        recursion='provider-descendants',
+    ),
     _source(
         'subdomainfinderc99',
         'subdomainfinderc99',
         'SearchSubdomainfinderc99',
         family='subdomainfinderc99',
+        recursion='provider-descendants',
     ),
-    _source('thc', 'thc', 'SearchThc', family='thc', limits=('provider-result-limit-10000',)),
-    _source('threatcrowd', 'threatcrowd', 'SearchThreatcrowd', family='threatcrowd', capabilities=('hostnames', 'ips')),
+    _source(
+        'thc',
+        'thc',
+        'SearchThc',
+        family='thc',
+        recursion='provider-descendants',
+        limits=('provider-result-limit-10000',),
+    ),
+    _source(
+        'threatcrowd',
+        'threatcrowd',
+        'SearchThreatcrowd',
+        family='threatcrowd',
+        capabilities=('hostnames', 'ips'),
+        recursion='provider-descendants',
+    ),
     _source(
         'tomba',
         'tombasearch',
@@ -395,7 +481,12 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         limits=_LIMIT,
     ),
     _source(
-        'urlscan', 'urlscan', 'SearchUrlscan', family='urlscan', capabilities=('hostnames', 'ips', 'interesting-urls', 'asns')
+        'urlscan',
+        'urlscan',
+        'SearchUrlscan',
+        family='urlscan',
+        capabilities=('hostnames', 'ips', 'interesting-urls', 'asns'),
+        recursion='provider-descendants',
     ),
     _source(
         'venacus',
@@ -406,16 +497,31 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         capabilities=('emails', 'ips', 'people', 'interesting-urls'),
         limits=_LIMIT,
     ),
-    _source('virustotal', 'virustotal', 'SearchVirustotal', family='virustotal', credentials=('api-key',)),
+    _source(
+        'virustotal',
+        'virustotal',
+        'SearchVirustotal',
+        family='virustotal',
+        credentials=('api-key',),
+        recursion='provider-descendants',
+    ),
     _source(
         'waybackarchive',
         'waybackarchive',
         'SearchWaybackarchive',
         family='web-archive',
         pagination='resume-key-until-exhausted',
+        recursion='provider-descendants',
         limits=('page-size-1000', 'maximum-pages-per-query-1000'),
     ),
-    _source('whoisxml', 'whoisxml', 'SearchWhoisXML', family='whoisxml', credentials=('api-key',)),
+    _source(
+        'whoisxml',
+        'whoisxml',
+        'SearchWhoisXML',
+        family='whoisxml',
+        credentials=('api-key',),
+        recursion='provider-descendants',
+    ),
     _source(
         'windvane',
         'windvane',
@@ -424,6 +530,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         credentials=('api-key',),
         capabilities=('hostnames', 'emails', 'ips'),
         activity=ActivityClass.DNS,
+        recursion='provider-descendants',
         limits=('dns-fallback-labels-20',),
     ),
     _source('yahoo', 'yahoosearch', 'SearchYahoo', family='web-search', capabilities=('hostnames', 'emails'), limits=_LIMIT),
@@ -434,6 +541,7 @@ SOURCE_CATALOG: Final[tuple[SourceSpec, ...]] = (
         family='zoomeye',
         credentials=('api-key',),
         capabilities=('hostnames', 'emails', 'ips', 'interesting-urls', 'asns'),
+        recursion='provider-descendants',
         limits=_LIMIT,
     ),
 )
