@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Hashable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -68,7 +69,6 @@ def _entity_line(entity: MergedEntity, selected: Sequence[SelectedObservation] =
 
 
 def _source_yield(result: RunResult) -> list[_SourceYield]:
-    addressability_evaluated = bool(result.dns_validations)
     source_families = {
         execution.source: execution.source_family
         for execution in result.source_executions
@@ -78,32 +78,37 @@ def _source_yield(result: RunResult) -> list[_SourceYield]:
         if not observation.source.startswith('action:'):
             source_families[observation.source] = observation.source_family
 
-    counts = {source: [0, 0, 0, 0] for source in source_families}
+    discovered_counts: Counter[str] = Counter()
+    exclusive_counts: Counter[str] = Counter()
+    current_counts: Counter[str] = Counter()
+    exclusive_current_counts: Counter[str] = Counter()
+    addressability_evaluated: dict[str, bool] = {}
     for entity in result.entities:
         if ScopeClass.IN_SCOPE not in entity.scope_classes or not entity.value.endswith(f'.{result.target}'):
             continue
         sources = {observation.source for observation in entity.observations if not observation.source.startswith('action:')}
         for source in sources:
-            discovered, exclusive, current, exclusive_current = counts[source]
-            discovered += 1
+            discovered_counts[source] += 1
             is_exclusive = len(sources) == 1
-            exclusive += is_exclusive
+            exclusive_counts[source] += is_exclusive
             is_current = entity.addressability is Addressability.CURRENT
-            current += is_current
-            exclusive_current += is_exclusive and is_current
-            counts[source] = [discovered, exclusive, current, exclusive_current]
+            current_counts[source] += is_current
+            exclusive_current_counts[source] += is_exclusive and is_current
+            addressability_evaluated[source] = addressability_evaluated.get(source, True) and bool(entity.dns_validations)
 
     rows: list[_SourceYield] = [
         _SourceYield(
             source=source,
             source_family=source_families[source],
-            discovered_subdomains=discovered,
-            exclusive_subdomains=exclusive,
-            currently_addressable_subdomains=current if addressability_evaluated else None,
-            exclusive_currently_addressable_subdomains=exclusive_current if addressability_evaluated else None,
-            addressability_evaluated=addressability_evaluated,
+            discovered_subdomains=discovered_counts[source],
+            exclusive_subdomains=exclusive_counts[source],
+            currently_addressable_subdomains=(current_counts[source] if addressability_evaluated.get(source, False) else None),
+            exclusive_currently_addressable_subdomains=(
+                exclusive_current_counts[source] if addressability_evaluated.get(source, False) else None
+            ),
+            addressability_evaluated=addressability_evaluated.get(source, False),
         )
-        for source, (discovered, exclusive, current, exclusive_current) in counts.items()
+        for source in source_families
     ]
     return sorted(
         rows,

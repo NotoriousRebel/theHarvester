@@ -265,6 +265,39 @@ async def test_completed_output_ranks_total_and_exclusive_subdomain_yield_by_sou
 
 
 @pytest.mark.asyncio
+async def test_source_yield_does_not_claim_addressability_after_unvalidated_incremental_merge() -> None:
+    class FirstSource:
+        name = 'first'
+        family = 'first-family'
+
+        async def collect(self, _target: str) -> list[SourceFinding]:
+            return [SourceFinding('first.example.com')]
+
+    class SecondSource:
+        name = 'second'
+        family = 'second-family'
+
+        async def collect(self, _target: str) -> list[SourceFinding]:
+            return [SourceFinding('second.example.com')]
+
+    result = await execute_run(
+        'example.com',
+        FirstSource(),
+        resolver_vantages=tuple(CompletedRunResolver(f'resolver-{index}') for index in range(3)),
+        persist=False,
+    )
+    result = await execute_run('example.com', SecondSource(), base_result=result, persist=False)
+
+    records = [json.loads(line) for line in run_result_jsonl(result).splitlines()]
+    yield_records = [record['data'] for record in records if record['record_type'] == 'source_yield']
+
+    assert result.dns_validations
+    assert all(not entity.dns_validations for entity in result.entities)
+    assert all(record['addressability_evaluated'] is False for record in yield_records)
+    assert all(record['currently_addressable_subdomains'] is None for record in yield_records)
+
+
+@pytest.mark.asyncio
 async def test_empty_and_failed_selected_stages_remain_visible() -> None:
     result = await execute_run('example.com', CompletedRunSource(), persist=False)
     result = complete_run(
