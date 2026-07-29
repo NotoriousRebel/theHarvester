@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Hashable, Iterable, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from theHarvester.lib.run import Addressability, ScopeClass, legacy_hostnames
@@ -13,6 +13,16 @@ if TYPE_CHECKING:
     from theHarvester.lib.run import MergedEntity, RunResult, SelectedObservation
 
 T = TypeVar('T', bound=Hashable)
+
+
+class _SourceYield(TypedDict):
+    source: str
+    source_family: str
+    discovered_subdomains: int
+    exclusive_subdomains: int
+    currently_addressable_subdomains: int | None
+    exclusive_currently_addressable_subdomains: int | None
+    addressability_evaluated: bool
 
 
 def sorted_unique[T: Hashable](items: Iterable[T]) -> list[T]:
@@ -57,6 +67,54 @@ def _entity_line(entity: MergedEntity, selected: Sequence[SelectedObservation] =
     return f'{entity.value} [status={entity.addressability}; sources={sources}{selected_status}{recursive_status}]'
 
 
+def _source_yield(result: RunResult) -> list[_SourceYield]:
+    addressability_evaluated = bool(result.dns_validations)
+    source_families = {
+        execution.source: execution.source_family
+        for execution in result.source_executions
+        if not execution.source.startswith('action:')
+    }
+    for observation in result.observations:
+        if not observation.source.startswith('action:'):
+            source_families[observation.source] = observation.source_family
+
+    counts = {source: [0, 0, 0, 0] for source in source_families}
+    for entity in result.entities:
+        if ScopeClass.IN_SCOPE not in entity.scope_classes or not entity.value.endswith(f'.{result.target}'):
+            continue
+        sources = {observation.source for observation in entity.observations if not observation.source.startswith('action:')}
+        for source in sources:
+            discovered, exclusive, current, exclusive_current = counts[source]
+            discovered += 1
+            is_exclusive = len(sources) == 1
+            exclusive += is_exclusive
+            is_current = entity.addressability is Addressability.CURRENT
+            current += is_current
+            exclusive_current += is_exclusive and is_current
+            counts[source] = [discovered, exclusive, current, exclusive_current]
+
+    rows: list[_SourceYield] = [
+        _SourceYield(
+            source=source,
+            source_family=source_families[source],
+            discovered_subdomains=discovered,
+            exclusive_subdomains=exclusive,
+            currently_addressable_subdomains=current if addressability_evaluated else None,
+            exclusive_currently_addressable_subdomains=exclusive_current if addressability_evaluated else None,
+            addressability_evaluated=addressability_evaluated,
+        )
+        for source, (discovered, exclusive, current, exclusive_current) in counts.items()
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            -row['exclusive_subdomains'],
+            -row['discovered_subdomains'],
+            str(row['source']),
+        ),
+    )
+
+
 def format_run_terminal(result: RunResult) -> str:
     """Render one concise terminal report from a completed evidence run."""
     primary = [
@@ -88,6 +146,7 @@ def format_run_terminal(result: RunResult) -> str:
         value: tuple(observation for observation in terminal_selected if observation.value == value) for value in entity_values
     }
     standalone_selected = [observation for observation in terminal_selected if observation.value not in entity_values]
+    source_yield = _source_yield(result)
     sections = [
         f'[*] Run status: {result.status}',
         f'[*] Currently addressable subdomains ({len(primary)})',
@@ -100,6 +159,13 @@ def format_run_terminal(result: RunResult) -> str:
         *(
             f'{observation.value} [{observation.kind}={observation.detail or "observed"}; source={observation.source}]'
             for observation in standalone_selected
+        ),
+        '[*] Source yield',
+        *(
+            f'{row["source"]} [discovered={row["discovered_subdomains"]}; exclusive={row["exclusive_subdomains"]}; '
+            f'currently-addressable={row["currently_addressable_subdomains"] if row["addressability_evaluated"] else "n/a"}; '
+            f'exclusive-current={row["exclusive_currently_addressable_subdomains"] if row["addressability_evaluated"] else "n/a"}]'
+            for row in source_yield
         ),
         '[*] Source executions',
         *(
@@ -126,6 +192,7 @@ def run_result_jsonl(result: RunResult) -> str:
             _run_record(result),
         ),
         *(('source_execution', execution.to_dict()) for execution in result.source_executions),
+        *(('source_yield', dict(row)) for row in _source_yield(result)),
         *(('discovery_observation', observation.to_dict()) for observation in result.observations),
         *(('dns_validation_observation', _jsonl_validation(observation.to_dict())) for observation in result.dns_validations),
         *(('merged_result', _jsonl_entity(entity)) for entity in result.entities),
@@ -156,6 +223,7 @@ def _evidence_summary(result: RunResult) -> dict[str, object]:
     summary = {
         **_run_record(result),
         'source_executions': [execution.to_dict() for execution in result.source_executions],
+        'source_yield': _source_yield(result),
         'selected_observations': [observation.to_dict() for observation in result.selected_observations],
     }
     recursive_observations = [observation.to_dict() for observation in result.observations if observation.parent is not None]

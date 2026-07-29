@@ -130,6 +130,7 @@ async def test_one_completed_run_drives_every_output_surface_without_losing_lega
     assert 'Scope-extension candidates (1)' in terminal
     assert 'status=currently-addressable; sources=fixture' in terminal
     assert 'Run status: complete' in terminal
+    assert 'fixture [discovered=2; exclusive=2; currently-addressable=1; exclusive-current=1]' in terminal
 
     assert {record['record_type'] for record in records} == {
         'run',
@@ -138,6 +139,7 @@ async def test_one_completed_run_drives_every_output_surface_without_losing_lega
         'dns_validation_observation',
         'merged_result',
         'selected_observation',
+        'source_yield',
     }
     assert all(record['schema_version'] == 'theharvester-evidence-v1' for record in records)
     discovery_records = [record['data'] for record in records if record['record_type'] == 'discovery_observation']
@@ -146,6 +148,17 @@ async def test_one_completed_run_drives_every_output_surface_without_losing_lega
     assert 'provider_observed_at' not in discovery_records[1]
     validation_records = [record['data'] for record in records if record['record_type'] == 'dns_validation_observation']
     assert all(record['validated_at'] for record in validation_records)
+    assert [record['data'] for record in records if record['record_type'] == 'source_yield'] == [
+        {
+            'source': 'fixture',
+            'source_family': 'fixture-family',
+            'discovered_subdomains': 2,
+            'exclusive_subdomains': 2,
+            'currently_addressable_subdomains': 1,
+            'exclusive_currently_addressable_subdomains': 1,
+            'addressability_evaluated': True,
+        }
+    ]
 
     assert legacy_json['cmd'] == 'theHarvester -d example.com'
     assert legacy_json['emails'] == ['ops@example.com']
@@ -196,6 +209,59 @@ async def test_incomplete_source_states_are_visible_on_every_completed_output(
     assert legacy_json_result(result)['evidence_run']['status'] == expected_run_status
     assert legacy_json_result(result)['evidence_run']['source_executions'][0]['status'] == expected_source_status
     assert ElementTree.fromstring(evidence_xml_fragment(result)).attrib['status'] == expected_run_status
+
+
+@pytest.mark.asyncio
+async def test_completed_output_ranks_total_and_exclusive_subdomain_yield_by_source() -> None:
+    class FirstSource:
+        name = 'first'
+        family = 'first-family'
+
+        async def collect(self, _target: str) -> list[SourceFinding]:
+            return [SourceFinding('shared.example.com'), SourceFinding('first-only.example.com')]
+
+    class SecondSource:
+        name = 'second'
+        family = 'second-family'
+
+        async def collect(self, _target: str) -> list[SourceFinding]:
+            return [SourceFinding('shared.example.com'), SourceFinding('second-only.example.com')]
+
+    result = await execute_run('example.com', FirstSource(), persist=False)
+    result = await execute_run('example.com', SecondSource(), persist=False, base_result=result)
+
+    terminal = format_run_terminal(result)
+    records = [json.loads(line) for line in run_result_jsonl(result).splitlines()]
+    yield_records = [record['data'] for record in records if record['record_type'] == 'source_yield']
+    legacy_yield = legacy_json_result(result)['evidence_run']['source_yield']
+
+    assert '[*] Source yield' in terminal
+    assert 'first [discovered=2; exclusive=1; currently-addressable=n/a; exclusive-current=n/a]' in terminal
+    assert 'second [discovered=2; exclusive=1; currently-addressable=n/a; exclusive-current=n/a]' in terminal
+    assert (
+        yield_records
+        == legacy_yield
+        == [
+            {
+                'source': 'first',
+                'source_family': 'first-family',
+                'discovered_subdomains': 2,
+                'exclusive_subdomains': 1,
+                'currently_addressable_subdomains': None,
+                'exclusive_currently_addressable_subdomains': None,
+                'addressability_evaluated': False,
+            },
+            {
+                'source': 'second',
+                'source_family': 'second-family',
+                'discovered_subdomains': 2,
+                'exclusive_subdomains': 1,
+                'currently_addressable_subdomains': None,
+                'exclusive_currently_addressable_subdomains': None,
+                'addressability_evaluated': False,
+            },
+        ]
+    )
 
 
 @pytest.mark.asyncio

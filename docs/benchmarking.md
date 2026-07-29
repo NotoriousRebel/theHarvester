@@ -39,3 +39,60 @@ The report deliberately omits the target, run identity, timestamps, entity and q
 A correctness fix qualifies for a sanitized fork implementation issue when a deterministic fixture demonstrates a specific invariant repair and the complete gate set shows no safety regression. A yield change qualifies only after repeated incremental currently-addressable-yield gains under equal declared budgets and equivalent provider availability; one showcase run is not enough. Publish only the behavior, aggregate checks, and implementation acceptance criteria to `NotoriousRebel/theHarvester`.
 
 Any separately authorized run against a consented target is opt-in, is executed outside this benchmark command, and keeps its evidence local. Never attach target names, credentials, raw payloads, sensitive evidence, or private research to an implementation issue.
+
+## Track live source yield
+
+Every completed run now reports source yield in the terminal and writes one
+`source_yield` record per selected provider to JSONL output. Each record
+contains:
+
+- `discovered_subdomains`: normalized in-scope names attributed to the source;
+- `exclusive_subdomains`: names found by that source and no other selected
+  provider;
+- `currently_addressable_subdomains`: discovered names supported by the
+  requested DNS validation; and
+- `exclusive_currently_addressable_subdomains`: exclusive names supported by
+  that validation.
+
+Current-addressability values are `null` in JSONL and `n/a` in the terminal
+when the run did not use exactly three resolver vantages. This prevents an
+unvalidated observation count from being presented as a current DNS result.
+
+Keep consented live runs in a private, ignored location:
+
+```console
+theHarvester \
+  -d example.com \
+  -b all \
+  --dns-resolve 1.1.1.1,8.8.8.8,9.9.9.9 \
+  -f /absolute/private/path/example-2026-07-29
+```
+
+Rank sources by exclusive contribution:
+
+```console
+jq -s '
+  [.[] | select(.record_type == "source_yield") | .data]
+  | sort_by(.exclusive_subdomains, .discovered_subdomains)
+  | reverse
+' example-2026-07-29.jsonl
+```
+
+List the exclusive names for private review:
+
+```console
+jq -r '
+  select(.record_type == "merged_result")
+  | .data
+  | ([.provenance[]
+      | select(.source | startswith("action:") | not)
+      | .source] | unique) as $sources
+  | select($sources | length == 1)
+  | [$sources[0], .value]
+  | @tsv
+' example-2026-07-29.jsonl
+```
+
+Compare repeated runs only when selected sources, available credentials,
+limits, DNS settings, and provider availability are equivalent. Keep target
+names and entity-level evidence out of public issues and pull requests.
