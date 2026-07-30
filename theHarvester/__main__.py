@@ -897,14 +897,27 @@ async def start(rest_args: argparse.Namespace | None = None, *, return_evidence_
                     dnsdb_started = time.perf_counter()
                     try:
                         dnsdb_search = dnsdb.SearchDNSDB(word)
-                        stor_lst.append(store(dnsdb_search, engineitem, store_host=True))
-                    except MissingKey as e:
-                        record_stage_result(engineitem, dnsdb_started, error=SourceSkippedError(str(e)))
+                        evidence_source = LegacyHostnameSource(
+                            name=engineitem,
+                            family=source_families.get(engineitem, engineitem),
+                            search=dnsdb_search,
+                            proxy=use_proxy,
+                        )
+                        stor_lst.append(
+                            store(
+                                dnsdb_search,
+                                engineitem,
+                                store_host=True,
+                                evidence_source=evidence_source,
+                            )
+                        )
+                    except MissingKey as error:
+                        record_stage_result(engineitem, dnsdb_started, error=SourceSkippedError(str(error)))
                         if not args.quiet:
-                            print(e)
-                    except Exception as e:
-                        record_stage_result(engineitem, dnsdb_started, error=e)
-                        show_default_error_message(engineitem, word, e)
+                            output_logger.info(error)
+                    except Exception as error:
+                        record_stage_result(engineitem, dnsdb_started, error=error)
+                        show_default_error_message(engineitem, word, error)
 
                 elif engineitem == 'dnsdumpster':
                     try:

@@ -15,7 +15,7 @@ import aiodns
 import aiosqlite
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
 
 class Derivation(StrEnum):
@@ -68,19 +68,27 @@ class RecursiveDNSLimits:
             raise ValueError('recursive DNS runtime must be greater than zero')
 
 
-class SourceRateLimitedError(Exception):
-    pass
-
-
-class SourceSkippedError(Exception):
-    pass
-
-
 @dataclass(frozen=True)
 class SourceFinding:
     value: str
     derivation: Derivation = Derivation.PROVIDER
     observed_at: datetime | None = None
+
+
+class SourceIncompleteError(Exception):
+    """Expose an incomplete source status without discarding valid findings."""
+
+    def __init__(self, message: str = '', *, findings: Sequence[SourceFinding] = ()) -> None:
+        super().__init__(message)
+        self.findings = tuple(findings)
+
+
+class SourceRateLimitedError(SourceIncompleteError):
+    pass
+
+
+class SourceSkippedError(Exception):
+    pass
 
 
 class StageFindingKind(StrEnum):
@@ -254,7 +262,7 @@ class AioDNSResolverVantage:
 class LegacyHostnameSearch(Protocol):
     async def process(self, proxy: bool = False) -> None: ...
 
-    async def get_hostnames(self) -> Sequence[str]: ...
+    async def get_hostnames(self) -> Collection[str]: ...
 
 
 @dataclass(frozen=True)
@@ -678,9 +686,23 @@ async def execute_run(
     result_count = 0
     error_type: str | None = None
 
+    findings: tuple[SourceFinding, ...] = ()
     try:
         findings = tuple(await source.collect(normalized_target))
-        result_count = len(findings)
+        status = SourceStatus.SUCCEEDED if findings else SourceStatus.EMPTY
+    except SourceRateLimitedError as error:
+        findings = error.findings
+        status = SourceStatus.RATE_LIMITED
+    except SourceIncompleteError as error:
+        findings = error.findings
+        error_type = type(error).__name__
+    except SourceSkippedError:
+        status = SourceStatus.SKIPPED
+    except Exception as error:
+        error_type = type(error).__name__
+
+    result_count = len(findings)
+    try:
         collected_at = datetime.now(UTC)
         observations = tuple(
             DiscoveryObservation(
@@ -696,12 +718,9 @@ async def execute_run(
             )
             for finding in findings
         )
-        status = SourceStatus.SUCCEEDED if observations else SourceStatus.EMPTY
-    except SourceRateLimitedError:
-        status = SourceStatus.RATE_LIMITED
-    except SourceSkippedError:
-        status = SourceStatus.SKIPPED
     except Exception as error:
+        observations = ()
+        status = SourceStatus.FAILED
         error_type = type(error).__name__
 
     observations = (*base_result.observations, *observations)

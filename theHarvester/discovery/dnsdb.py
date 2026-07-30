@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib.parse import quote
 
 import aiohttp
@@ -8,7 +9,9 @@ import aiohttp
 from theHarvester import __version__
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib.core import Core
-from theHarvester.lib.run import SourceRateLimitedError
+from theHarvester.lib.run import SourceFinding, SourceIncompleteError, SourceRateLimitedError
+
+logger = logging.getLogger(__name__)
 
 
 class SearchDNSDB:
@@ -43,6 +46,9 @@ class SearchDNSDB:
             return hostname
         return None
 
+    def _partial_findings(self) -> tuple[SourceFinding, ...]:
+        return tuple(SourceFinding(hostname) for hostname in sorted(self.totalhosts))
+
     async def do_search(self) -> None:
         query = quote(f'*.{self.target_domain}', safe='*.')
         url = f'{self.BASE_URL}/{query}?limit=0'
@@ -71,16 +77,19 @@ class SearchDNSDB:
                     try:
                         record = json.loads(line)
                     except (UnicodeDecodeError, json.JSONDecodeError):
-                        print('DNSDB returned malformed NDJSON; partial results were preserved.')
-                        break
+                        message = 'DNSDB returned malformed NDJSON; partial results were preserved.'
+                        logger.info(message)
+                        raise SourceIncompleteError(message, findings=self._partial_findings())
                     if not isinstance(record, dict):
-                        print('DNSDB returned an invalid stream record; partial results were preserved.')
-                        break
+                        message = 'DNSDB returned an invalid stream record; partial results were preserved.'
+                        logger.info(message)
+                        raise SourceIncompleteError(message, findings=self._partial_findings())
                     if first_record:
                         first_record = False
                         if record.get('cond') != 'begin':
-                            print('DNSDB stream did not begin correctly; no results were accepted.')
-                            return
+                            message = 'DNSDB stream did not begin correctly; no results were accepted.'
+                            logger.info(message)
+                            raise SourceIncompleteError(message)
                         continue
 
                     condition = record.get('cond')
@@ -92,11 +101,17 @@ class SearchDNSDB:
                         self.totalhosts.add(hostname)
 
                 if terminal_condition == 'limited':
-                    print('DNSDB reached its account result limit; partial results were preserved.')
+                    message = 'DNSDB reached its account result limit; partial results were preserved.'
+                    logger.info(message)
+                    raise SourceRateLimitedError(message, findings=self._partial_findings())
                 elif terminal_condition == 'failed':
-                    print('DNSDB reported a failed stream; partial results were preserved.')
+                    message = 'DNSDB reported a failed stream; partial results were preserved.'
+                    logger.info(message)
+                    raise SourceIncompleteError(message, findings=self._partial_findings())
                 elif terminal_condition != 'succeeded':
-                    print('DNSDB stream ended without a terminal condition; partial results were preserved.')
+                    message = 'DNSDB stream ended without a terminal condition; partial results were preserved.'
+                    logger.info(message)
+                    raise SourceIncompleteError(message, findings=self._partial_findings())
 
     async def get_hostnames(self) -> set[str]:
         return self.totalhosts

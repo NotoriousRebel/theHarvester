@@ -11,6 +11,7 @@ from theHarvester.lib.run import (
     AioDNSResolverVantage,
     Derivation,
     DNSResponse,
+    RunResult,
     ScopeClass,
     SourceFinding,
     SourceRateLimitedError,
@@ -538,6 +539,71 @@ async def test_crtsh_bridge_executes_once_and_feeds_legacy_consumers(monkeypatch
     assert stored_result['status'] == 'complete'
     assert stored_result['completed_at'] >= captured[0].completed_at.isoformat()
     assert stored == [('example.com', ('www.example.com',), 'host', 'CRTsh')]
+
+
+@pytest.mark.asyncio
+async def test_dnsdb_bridge_preserves_partial_results_and_rate_limited_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import theHarvester.__main__ as main_module
+
+    class FakeDNSDBSearch:
+        def __init__(self, target: str) -> None:
+            assert target == 'example.com'
+
+        async def process(self, _proxy: bool = False) -> None:
+            raise SourceRateLimitedError(
+                'DNSDB result limit reached',
+                findings=(SourceFinding('partial.example.com'),),
+            )
+
+        async def get_hostnames(self) -> list[str]:
+            raise AssertionError('partial findings must come from the incomplete source result')
+
+    class FakeStashManager:
+        async def do_init(self) -> None:
+            return None
+
+        async def store_all(self, *_args: object) -> None:
+            return None
+
+    saved: list[RunResult] = []
+
+    class FakeRunStore:
+        async def save(self, result: RunResult) -> None:
+            saved.append(result)
+
+    monkeypatch.setattr(main_module.dnsdb, 'SearchDNSDB', FakeDNSDBSearch)
+    monkeypatch.setattr(main_module.stash, 'StashManager', FakeStashManager)
+    monkeypatch.setattr(main_module, 'SQLiteRunStore', FakeRunStore)
+
+    response = await main_module.start(
+        SimpleNamespace(
+            api_scan=False,
+            dns_brute=False,
+            dns_lookup=False,
+            dns_resolve='',
+            dns_server=None,
+            domain='example.com',
+            filename='',
+            limit=500,
+            proxies=False,
+            quiet=True,
+            screenshot='',
+            shodan=False,
+            source='dnsdb',
+            start=0,
+            take_over=False,
+            wordlist='',
+        ),
+        return_evidence_run=True,
+    )
+
+    result = response[-1]
+    assert result is saved[0]
+    assert {observation.value for observation in result.observations} == {'partial.example.com'}
+    assert result.source_executions[0].status is SourceStatus.RATE_LIMITED
+    assert response[8] == ['partial.example.com']
 
 
 @pytest.mark.parametrize(

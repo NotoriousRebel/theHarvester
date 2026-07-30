@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from theHarvester.discovery import dnsdb
+from theHarvester.lib.run import LegacyHostnameSource, SourceStatus, execute_run
 
 
 def _install_response(
@@ -15,10 +18,10 @@ def _install_response(
     lines_left = list(lines)
 
     class FakeContent:
-        def __aiter__(self):
+        def __aiter__(self) -> FakeContent:
             return self
 
-        async def __anext__(self):
+        async def __anext__(self) -> bytes:
             if not lines_left:
                 raise StopAsyncIteration
             return lines_left.pop(0)
@@ -29,25 +32,25 @@ def _install_response(
 
         content = FakeContent()
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> FakeResponse:
             return self
 
-        async def __aexit__(self, *_args):
+        async def __aexit__(self, *_args: object) -> None:
             return None
 
     class FakeSession:
-        def __init__(self, **kwargs):
+        def __init__(self, **kwargs: object) -> None:
             requested['session'] = kwargs
 
-        def get(self, url: str, **kwargs):
+        def get(self, url: str, **kwargs: object) -> FakeResponse:
             requested['url'] = url
             requested['request'] = kwargs
             return FakeResponse()
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> FakeSession:
             return self
 
-        async def __aexit__(self, *_args):
+        async def __aexit__(self, *_args: object) -> None:
             return None
 
     monkeypatch.setattr(dnsdb.aiohttp, 'ClientSession', FakeSession)
@@ -84,7 +87,7 @@ async def test_process_collects_normalized_in_scope_rrset_owners(monkeypatch: py
 
 
 @pytest.mark.parametrize(
-    ('lines', 'expected_warning'),
+    ('lines', 'expected_warning', 'expected_error'),
     [
         (
             (
@@ -93,6 +96,7 @@ async def test_process_collects_normalized_in_scope_rrset_owners(monkeypatch: py
                 b'{"cond":"limited","msg":"Result limit reached"}\n',
             ),
             'DNSDB reached its account result limit; partial results were preserved.',
+            dnsdb.SourceRateLimitedError,
         ),
         (
             (
@@ -103,24 +107,62 @@ async def test_process_collects_normalized_in_scope_rrset_owners(monkeypatch: py
                 b'{"cond":"succeeded"}\n',
             ),
             'DNSDB returned malformed NDJSON; partial results were preserved.',
+            dnsdb.SourceIncompleteError,
         ),
     ],
 )
 @pytest.mark.asyncio
 async def test_process_preserves_results_before_incomplete_streams(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
     lines: tuple[bytes, ...],
     expected_warning: str,
+    expected_error: type[Exception],
 ) -> None:
+    caplog.set_level(logging.INFO, logger=dnsdb.__name__)
     monkeypatch.setattr(dnsdb.Core, 'dnsdb_key', lambda: 'dnsdb-test-key')
     _install_response(monkeypatch, lines)
 
     search = dnsdb.SearchDNSDB('example.com')
-    await search.process()
+    with pytest.raises(expected_error):
+        await search.process()
 
     assert await search.get_hostnames() == {'first.example.com'}
-    assert expected_warning in capsys.readouterr().out
+    assert expected_warning in caplog.messages
+
+
+@pytest.mark.parametrize(
+    ('terminal_condition', 'expected_status'),
+    [
+        ('limited', SourceStatus.RATE_LIMITED),
+        ('failed', SourceStatus.FAILED),
+    ],
+)
+@pytest.mark.asyncio
+async def test_incomplete_stream_status_keeps_partial_results_in_completed_run(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_condition: str,
+    expected_status: SourceStatus,
+) -> None:
+    monkeypatch.setattr(dnsdb.Core, 'dnsdb_key', lambda: 'dnsdb-test-key')
+    _install_response(
+        monkeypatch,
+        (
+            b'{"cond":"begin"}\n',
+            b'{"obj":{"rrname":"first.example.com."}}\n',
+            f'{{"cond":"{terminal_condition}"}}\n'.encode(),
+        ),
+    )
+    search = dnsdb.SearchDNSDB('example.com')
+
+    result = await execute_run(
+        'example.com',
+        LegacyHostnameSource('dnsdb', 'passive-dns', search),
+        persist=False,
+    )
+
+    assert {observation.value for observation in result.observations} == {'first.example.com'}
+    assert result.source_executions[0].status is expected_status
 
 
 @pytest.mark.asyncio
