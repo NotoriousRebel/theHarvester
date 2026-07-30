@@ -600,9 +600,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.output:
             Path(args.output).write_text(f'{artifact}\n', encoding='utf-8')
         else:
-            print(artifact)
+            sys.stdout.write(f'{artifact}\n')
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        print('benchmark input error', file=sys.stderr)
+        sys.stderr.write('benchmark input error\n')
         return 2
     return 0 if report['passed'] else 1
 

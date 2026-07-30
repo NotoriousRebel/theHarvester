@@ -1,9 +1,12 @@
 import json as _stdlib_json
+import logging
 from datetime import datetime, timedelta
 from types import ModuleType
 from urllib.parse import urlencode, urlsplit
 
 from theHarvester.lib.core import AsyncFetcher, Core
+
+logger = logging.getLogger(__name__)
 
 json: ModuleType = _stdlib_json
 try:
@@ -56,16 +59,16 @@ class SearchCommoncrawl:
         dated_indexes: list[tuple[datetime, dict]] = []
         for entry in catalog:
             if not isinstance(entry, dict):
-                print('Common Crawl API error for index unknown: invalid catalog entry')
+                logger.info('Common Crawl API error for index unknown: invalid catalog entry')
                 continue
             index_id = entry.get('id', 'unknown')
             if not isinstance(entry.get('cdx-api'), str):
-                print(f'Common Crawl API error for index {index_id}: invalid catalog entry')
+                logger.info(f'Common Crawl API error for index {index_id}: invalid catalog entry')
                 continue
             try:
                 timestamp = datetime.fromisoformat(str(entry['to'])).replace(tzinfo=None)
             except (KeyError, ValueError):
-                print(f'Common Crawl API error for index {index_id}: invalid catalog entry')
+                logger.info(f'Common Crawl API error for index {index_id}: invalid catalog entry')
                 continue
             dated_indexes.append((timestamp, entry))
 
@@ -89,12 +92,12 @@ class SearchCommoncrawl:
                 [f'{self.hostname}/collinfo.json'], headers=headers, proxy=self.proxy, json=True
             )
             if not catalog_response or not isinstance(catalog_response[0], list) or not catalog_response[0]:
-                print('Common Crawl API error: invalid index catalog')
+                logger.info('Common Crawl API error: invalid index catalog')
                 return
 
             indexes = self._select_indexes(catalog_response[0])
             if not indexes:
-                print('Common Crawl API error: index catalog contains no usable entries')
+                logger.info('Common Crawl API error: index catalog contains no usable entries')
                 return
 
             for index in indexes:
@@ -119,11 +122,11 @@ class SearchCommoncrawl:
                                         self.totalhosts.add(domain)
 
                 except Exception as e:
-                    print(f'Common Crawl API error for index {index.get("id", "unknown")}: {e}')
+                    logger.info(f'Common Crawl API error for index {index.get("id", "unknown")}: {e}')
                     continue
 
         except Exception as e:
-            print(f'Common Crawl API error: {e}')
+            logger.info(f'Common Crawl API error: {e}')
 
     async def get_hostnames(self) -> set:
         return self.totalhosts

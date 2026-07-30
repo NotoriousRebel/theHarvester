@@ -1,6 +1,9 @@
+import logging
 from urllib.parse import urlencode
 
 from theHarvester.lib.core import AsyncFetcher
+
+logger = logging.getLogger(__name__)
 
 
 class SearchCertspoter:
@@ -63,11 +66,13 @@ class SearchCertspoter:
                 seen_cursors.add(next_cursor)
                 cursor = next_cursor
             else:
-                print(f'Cert Spotter stopped after {self.MAX_PAGES} pages; results may be incomplete.')
+                logger.info(f'Cert Spotter stopped after {self.MAX_PAGES} pages; results may be incomplete.')
+        except IndexError:
+            logger.info('No data returned from Cert Spotter.')
         except ConnectionError:
-            print('Network connection failed.')
+            logger.info('Network connection failed.')
         except Exception as e:
-            print(f'Unexpected error occurred: {e}')
+            logger.info(f'Unexpected error occurred: {e}')
 
     async def get_hostnames(self) -> set[str]:
         return self.totalhosts
@@ -75,4 +80,4 @@ class SearchCertspoter:
     async def process(self, proxy: bool = False) -> None:
         self.proxy = proxy
         await self.do_search()
-        print('\tSearching results.')
+        logger.info('\tSearching results.')
