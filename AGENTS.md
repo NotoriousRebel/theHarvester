@@ -58,6 +58,8 @@ For implementation work:
 3. Keep `dev` and `master` as clean fork baselines.
 4. Push branches only to `origin`.
 
+If work depends on an unmerged fork pull request, stack it explicitly on that pull request's branch. After the prerequisite merges, retarget the dependent pull request to `dev` and verify its diff again. Do not assume a change merged upstream also exists on the fork.
+
 Preserve existing worktree changes. Treat unrelated modifications as user-owned.
 
 Completion criterion: the task is isolated on the intended fork branch without disturbing unrelated work.
@@ -87,6 +89,12 @@ Apply four checks:
 Remove imports, variables, or helpers made unused by the change. Record unrelated findings separately.
 
 Security-sensitive behavior stays fail-closed. Use mocked provider responses in tests; routine verification must not perform live reconnaissance against third-party targets.
+
+Logging is a repository contract:
+
+- Use `output_logger.info(...)` for operator-facing CLI output.
+- Use a module logger from `logging.getLogger(__name__)` for diagnostics shown by `--verbose`.
+- Do not add direct `print(...)` calls to production Python. Ruff rule `T20` enforces this.
 
 Completion criterion: the diff contains only the requested behavior and supporting tests or documentation.
 
