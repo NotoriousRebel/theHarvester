@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -98,8 +99,9 @@ async def test_process_uses_unique_indexes_from_latest_catalog_year_window_and_s
 @pytest.mark.asyncio
 @pytest.mark.parametrize('broken_payload', ['not-json', ''])
 async def test_process_reports_failed_or_malformed_index_without_discarding_other_results(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], broken_payload: str
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken_payload: str
 ) -> None:
+    caplog.set_level(logging.INFO, logger=commoncrawl.__name__)
     broken_endpoint = 'https://index.commoncrawl.org/CC-MAIN-2026-30-index'
     good_endpoint = 'https://index.commoncrawl.org/CC-MAIN-2026-26-index'
     catalog = [
@@ -130,6 +132,5 @@ async def test_process_reports_failed_or_malformed_index_without_discarding_othe
     await search.process()
 
     assert await search.get_hostnames() == {'survivor.example.com'}
-    output = capsys.readouterr().out
-    assert 'CC-MAIN-BROKEN' in output
-    assert 'CC-MAIN-2026-30' in output
+    assert any('CC-MAIN-BROKEN' in message for message in caplog.messages)
+    assert any('CC-MAIN-2026-30' in message for message in caplog.messages)

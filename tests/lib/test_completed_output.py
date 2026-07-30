@@ -251,6 +251,7 @@ async def test_cli_adapts_and_persists_the_run_only_after_selected_direct_work(
                 source='crtsh',
                 start=0,
                 take_over=True,
+                verbose=False,
                 wordlist='',
             )
 
