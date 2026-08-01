@@ -5,6 +5,7 @@ import contextlib
 import logging
 import random
 import ssl
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -31,6 +32,14 @@ CONFIG_DIRS = [
     Path('/etc/theHarvester/'),
     Path('/usr/local/etc/theHarvester/'),
 ]
+
+
+@dataclass(frozen=True)
+class FetcherResponse:
+    """Buffered response data for callers that need HTTP status."""
+
+    body: Any
+    status: int
 
 
 class Core:
@@ -333,6 +342,7 @@ class Core:
             'securityTrails',
             'sherlockeye',
             'shodan',
+            'shodanct',
             'shodanInternetDB',
             'subdomaincenter',
             'subdomainfinderc99',
@@ -490,9 +500,26 @@ class AsyncFetcher:
         return aiohttp.ClientSession(headers=headers, timeout=client_timeout, connector=connector)
 
     @staticmethod
-    async def _read_response(response: aiohttp.ClientResponse, *, json: bool, delay: int) -> Any:
+    async def _read_response(
+        response: aiohttp.ClientResponse,
+        *,
+        json: bool,
+        delay: int,
+        include_metadata: bool = False,
+    ) -> Any:
         await asyncio.sleep(delay)
-        return await response.text() if json is False else await response.json()
+        try:
+            body = await response.text() if json is False else await response.json()
+        except (aiohttp.ContentTypeError, ValueError):
+            if not include_metadata:
+                raise
+            body = await response.text()
+        if not include_metadata:
+            return body
+        return FetcherResponse(
+            body=body,
+            status=response.status,
+        )
 
     @classmethod
     async def _request(
@@ -504,15 +531,26 @@ class AsyncFetcher:
         json: bool = False,
         delay: int = 5,
         request_timeout: int | None = None,
+        include_metadata: bool = False,
         **request_kwargs: Any,
     ) -> Any:
         if request_timeout:
             async with asyncio.timeout(request_timeout):
                 async with session.request(method.upper(), url, **request_kwargs) as response:
-                    return await cls._read_response(response, json=json, delay=delay)
+                    return await cls._read_response(
+                        response,
+                        json=json,
+                        delay=delay,
+                        include_metadata=include_metadata,
+                    )
 
         async with session.request(method.upper(), url, **request_kwargs) as response:
-            return await cls._read_response(response, json=json, delay=delay)
+            return await cls._read_response(
+                response,
+                json=json,
+                delay=delay,
+                include_metadata=include_metadata,
+            )
 
     @staticmethod
     def _get_random_proxy(proxy_dict: dict) -> tuple[str | None, str | None]:
@@ -624,11 +662,13 @@ class AsyncFetcher:
         verify: bool | None = None,
         follow_redirects: bool | None = None,
         request_timeout: int | None = None,
+        include_metadata: bool = False,
     ) -> Any:
         """Generic HTTP request helper.
         - If a session is not provided, one will be created and closed automatically.
         - Supports optional headers, method selection, proxy, ssl verification, redirects and timeout.
         - Returns response text or json depending on `json` flag.
+        - With `include_metadata`, returns `FetcherResponse` or `None` on transport failure.
         """
         try:
             ssl_arg = cls._ssl_context(verify)
@@ -665,13 +705,14 @@ class AsyncFetcher:
                     json=json,
                     delay=5,
                     request_timeout=request_timeout,
+                    include_metadata=include_metadata,
                     **request_kwargs,
                 )
             finally:
                 if owns_session:
                     await session.close()
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
-            return ''
+            return None if include_metadata else ''
 
     @staticmethod
     async def takeover_fetch(session, url: str, proxy: str | None = None) -> tuple[Any, Any] | str:

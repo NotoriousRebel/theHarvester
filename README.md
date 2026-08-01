@@ -173,6 +173,7 @@ Read the **API key** column as follows:
 | `securityTrails` | ✓ | No | ✓ | No | No | No | No | ✓ |
 | `sherlockeye` | ✓ | ✓ | ✓ | No | No | No | No | ✓ |
 | `shodan` | ✓ | No | No | No | No | No | `-s` / `--shodan` host-enrichment output | ✓ |
+| `shodanct` | ✓ | No | No | No | No | No | No | No |
 | `shodanInternetDB` | ✓ | No | ✓ | No | No | No | No | No |
 | `subdomaincenter` | ✓ | No | No | No | No | No | No | No |
 | `subdomainfinderc99` | ✓ | No | No | No | No | No | No | No |

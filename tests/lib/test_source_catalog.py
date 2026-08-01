@@ -80,6 +80,7 @@ def test_source_specs_classify_provider_descendant_queries() -> None:
         'rapiddns',
         'robtex',
         'securityTrails',
+        'shodanct',
         'subdomaincenter',
         'subdomainfinderc99',
         'thc',

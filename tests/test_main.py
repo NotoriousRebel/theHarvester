@@ -17,3 +17,14 @@ def test_normalize_hosts_for_storage_uses_the_parser_scope(target: str, expected
     }
 
     assert theharvester_main._normalize_hosts_for_storage(discovered_hosts, target) == expected
+
+
+@pytest.mark.asyncio
+async def test_source_help_lists_shodanct(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(theharvester_main.sys, 'argv', ['theHarvester', '--help'])
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert 'shodanct' in capsys.readouterr().out

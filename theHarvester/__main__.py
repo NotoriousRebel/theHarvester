@@ -62,6 +62,7 @@ from theHarvester.discovery import (
     securitytrailssearch,
     sherlockeye,
     shodan_internetdb,
+    shodanct,
     shodansearch,
     subdomaincenter,
     subdomainfinderc99,
@@ -253,7 +254,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                             Sources: baidu, bevigil, bitbucket, brave, bufferoverun,
                             builtwith, censys, certspotter, chaos, commoncrawl, criminalip, crtsh, dehashed, dnsdumpster, duckduckgo, dymo, fofa, fullhunt, github-code,
                             gitlab, hackertarget, haveibeenpwned, hudsonrock, hunter, hunterhow, intelx, leakix, leaklookup, mojeek, netlas, onyphe, otx, pentesttools,
-                            projectdiscovery, rapiddns, robtex, rocketreach, securityscorecard, securityTrails, sherlockeye, shodan, shodanInternetDB, subdomaincenter,
+                            projectdiscovery, rapiddns, robtex, rocketreach, securityscorecard, securityTrails, sherlockeye, shodan, shodanct, shodanInternetDB, subdomaincenter,
                             subdomainfinderc99, thc, threatcrowd, tomba, urlscan, venacus, virustotal, waybackarchive, whoisxml, windvane, yahoo, zoomeye""",
     )
 
@@ -1243,6 +1244,18 @@ async def start(rest_args: argparse.Namespace | None = None):
                     except Exception as e:
                         if not args.quiet:
                             output_logger.info(f'Unexpected error occurred in Shodan InternetDB module: {e}')
+
+                elif engineitem == 'shodanct':
+                    shodanct_search = shodanct.SearchShodanCt(word)
+                    source_spec = get_source_spec(engineitem)
+                    evidence_sources.append(
+                        LegacyHostnameSource(
+                            name=source_spec.name,
+                            legacy_name=source_spec.name,
+                            search=shodanct_search,
+                            proxy=use_proxy,
+                        )
+                    )
 
                 elif engineitem == 'subdomaincenter':
                     try:

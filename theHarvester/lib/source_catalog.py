@@ -89,6 +89,7 @@ _SPECS = (
     _spec('securityscorecard', ResultRoute.HOSTS, ResultRoute.IPS),
     _spec('sherlockeye', ResultRoute.HOSTS, ResultRoute.EMAILS, ResultRoute.IPS),
     _spec('shodan', ResultRoute.HOSTS),
+    _spec('shodanct', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('shodanInternetDB', ResultRoute.HOSTS, ResultRoute.IPS),
     _spec('subdomaincenter', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('subdomainfinderc99', ResultRoute.HOSTS, queries_provider_descendants=True),

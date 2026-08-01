@@ -25,14 +25,24 @@ async def test_cli_finishes_selected_work_before_persisting_and_reporting(monkey
             assert target == 'example.com'
 
         async def process(self, _proxy: bool = False) -> None:
-            events.append('source')
+            events.append('crtsh')
 
         async def get_hostnames(self) -> list[str]:
             return ['api.example.com', 'outside.example.net']
 
+    class FakeShodanCtSearch:
+        def __init__(self, target: str) -> None:
+            assert target == 'example.com'
+
+        async def process(self, _proxy: bool = False) -> None:
+            events.append('shodanct')
+
+        async def get_hostnames(self) -> list[str]:
+            return ['ct.example.com']
+
     class FakeTakeOver:
         def __init__(self, hosts: list[str]) -> None:
-            assert hosts == ['api.example.com']
+            assert hosts == ['api.example.com', 'ct.example.com']
 
         async def populate_fingerprints(self) -> None:
             return None
@@ -107,6 +117,7 @@ async def test_cli_finishes_selected_work_before_persisting_and_reporting(monkey
     wordlist = tmp_path / 'api-words.txt'
     wordlist.write_text('/api\n')
     monkeypatch.setattr(main_module.crtsh, 'SearchCrtsh', FakeCrtshSearch)
+    monkeypatch.setattr(main_module.shodanct, 'SearchShodanCt', FakeShodanCtSearch)
     monkeypatch.setattr(main_module.takeover, 'TakeOver', FakeTakeOver)
     monkeypatch.setattr(main_module.api_endpoints, 'SearchApiEndpoints', FakeApiEndpoints)
     monkeypatch.setattr(main_module.stash, 'StashManager', FakeStashManager)
@@ -120,7 +131,7 @@ async def test_cli_finishes_selected_work_before_persisting_and_reporting(monkey
             '-d',
             'Example.COM.',
             '-b',
-            'crtsh',
+            'crtsh,shodanct',
             '-t',
             '-a',
             '-w',
@@ -135,9 +146,11 @@ async def test_cli_finishes_selected_work_before_persisting_and_reporting(monkey
 
     assert exit_info.value.code == 0
     assert events == [
-        'source',
+        'crtsh',
+        'shodanct',
         'takeover',
         'api-scan',
+        'legacy-persist',
         'legacy-persist',
         'legacy-persist',
         'persist',
@@ -145,9 +158,12 @@ async def test_cli_finishes_selected_work_before_persisting_and_reporting(monkey
     ]
     assert persisted[0].source_executions[0].observation_count == 2
     assert persisted[0].source_executions[0].entity_count == 2
+    assert persisted[0].source_executions[1].observation_count == 1
+    assert persisted[0].source_executions[1].entity_count == 1
     result_records = {(record.type, record.value) for record in persisted[0].results}
     assert {
         ('subdomain', 'api.example.com'),
+        ('subdomain', 'ct.example.com'),
         ('scope-extension', 'outside.example.net'),
         ('api-endpoint', 'https://example.com/api'),
         ('api-endpoint', 'https://example.com/private'),
@@ -161,6 +177,7 @@ async def test_cli_finishes_selected_work_before_persisting_and_reporting(monkey
     } <= result_records
     records_by_value = {record.value: record for record in persisted[0].results}
     assert records_by_value['api.example.com'].sources == ('crtsh',)
+    assert records_by_value['ct.example.com'].sources == ('shodanct',)
     assert records_by_value['https://example.com/private'].sources == ('api-scan',)
     assert json.loads((tmp_path / 'completed-run.json').read_text())['run']['status'] == 'complete'
     jsonl_records = {

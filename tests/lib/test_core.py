@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 import theHarvester.lib.core as core_module
-from theHarvester.lib.core import CONFIG_DIRS, DATA_DIR, AsyncFetcher, Core
+from theHarvester.lib.core import CONFIG_DIRS, DATA_DIR, AsyncFetcher, Core, FetcherResponse
 
 
 @pytest.fixture(autouse=True)
@@ -131,9 +131,16 @@ def test_read_config_copies_default_to_home(name: str, capsys):
 
 
 class DummyResponse:
-    def __init__(self, text_value: str = 'response-text', json_value: Any = None):
+    def __init__(
+        self,
+        text_value: str = 'response-text',
+        json_value: Any = None,
+        *,
+        status: int = 200,
+    ):
         self.text_value = text_value
         self.json_value = {'ok': True} if json_value is None else json_value
+        self.status = status
 
     async def __aenter__(self):
         return self
@@ -255,6 +262,25 @@ async def test_fetch_creates_session_with_default_headers(monkeypatch) -> None:
     assert session.requests == [
         ('GET', 'https://example.com', {'ssl': 'ssl-context', 'allow_redirects': False})
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_can_preserve_response_metadata(monkeypatch) -> None:
+    class RateLimitedSession(DummySession):
+        def request(self, method: str, url: str, **kwargs: Any) -> DummyResponse:
+            self.requests.append((method, url, kwargs))
+            return DummyResponse(
+                json_value={'error': 'busy'},
+                status=429,
+            )
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', RateLimitedSession)
+    monkeypatch.setattr(core_module.asyncio, 'sleep', fake_sleep)
+
+    result = await AsyncFetcher.fetch(url='https://example.com', json=True, include_metadata=True)
+
+    assert result == FetcherResponse({'error': 'busy'}, 429)
 
 
 @pytest.mark.asyncio
