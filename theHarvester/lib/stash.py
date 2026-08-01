@@ -336,6 +336,27 @@ class StashManager:
             ),
         )
 
+    async def list_runs(self, *, limit: int = 50) -> list[dict[str, str]]:
+        """List the most recently completed runs without loading their evidence."""
+        async with aiosqlite.connect(self.db, timeout=30) as db:
+            rows = await (
+                await db.execute(
+                    'SELECT run_id, target, started_at, completed_at, status '
+                    'FROM enumeration_runs ORDER BY completed_at DESC LIMIT ?',
+                    (limit,),
+                )
+            ).fetchall()
+        return [
+            {
+                'run_id': row[0],
+                'target': row[1],
+                'started_at': row[2],
+                'completed_at': row[3],
+                'status': row[4],
+            }
+            for row in rows
+        ]
+
     async def store(self, domain, resource, res_type, source) -> None:
         self.domain = domain
         self.resource = resource

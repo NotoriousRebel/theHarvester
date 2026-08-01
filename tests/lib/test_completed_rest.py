@@ -130,3 +130,96 @@ def test_dnsbrute_adds_completed_run_without_changing_legacy_results(monkeypatch
     assert response.json()['dns_bruteforce'] == ['brute.example.com:192.0.2.10']
     assert response.json()['run']['status'] == 'partial'
     assert 'run' in api.app.openapi()['components']['schemas']['DnsBruteResponse']['properties']
+
+
+def test_rest_lists_completed_runs(monkeypatch) -> None:
+    from theHarvester.lib import stash
+    from theHarvester.lib.api import api
+
+    class FakeStashManager:
+        async def do_init(self) -> None:
+            return None
+
+        async def list_runs(self, *, limit: int):
+            assert limit == 1
+            return [
+                {
+                    'run_id': 'run-1',
+                    'target': 'example.com',
+                    'started_at': '2026-07-31T12:00:00+00:00',
+                    'completed_at': '2026-07-31T12:01:00+00:00',
+                    'status': 'complete',
+                }
+            ]
+
+    monkeypatch.setattr(stash, 'StashManager', FakeStashManager)
+    monkeypatch.setenv('THEHARVESTER_API_KEY', 'test-secret')
+
+    response = TestClient(api.app).get('/runs?limit=1', headers={'X-API-Key': 'test-secret'})
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            'run_id': 'run-1',
+            'target': 'example.com',
+            'started_at': '2026-07-31T12:00:00+00:00',
+            'completed_at': '2026-07-31T12:01:00+00:00',
+            'status': 'complete',
+        }
+    ]
+
+
+def test_rest_retrieves_one_completed_run_and_reports_missing_ids(monkeypatch) -> None:
+    from theHarvester.lib import stash
+    from theHarvester.lib.api import api
+
+    completed = complete_run(
+        start_run('example.com'),
+        results=(ResultRecord('subdomain', 'api.example.com'),),
+        completed_at=datetime(2026, 7, 31, 12, 1, tzinfo=UTC),
+    )
+
+    class FakeStashManager:
+        async def do_init(self) -> None:
+            return None
+
+        async def load_run(self, run_id: str):
+            return completed if run_id == completed.run_id else None
+
+    monkeypatch.setattr(stash, 'StashManager', FakeStashManager)
+    monkeypatch.setenv('THEHARVESTER_API_KEY', 'test-secret')
+    client = TestClient(api.app)
+
+    response = client.get(f'/runs/{completed.run_id}', headers={'X-API-Key': 'test-secret'})
+    missing = client.get('/runs/missing', headers={'X-API-Key': 'test-secret'})
+
+    assert response.status_code == 200
+    assert response.json()['target'] == 'example.com'
+    assert response.json()['results'] == [{'type': 'subdomain', 'value': 'api.example.com'}]
+    assert missing.status_code == 404
+    assert missing.json() == {'detail': 'Completed run not found'}
+
+
+def test_run_history_fails_closed_without_the_operator_api_key(monkeypatch) -> None:
+    from theHarvester.lib import stash
+    from theHarvester.lib.api import api
+
+    class FakeStashManager:
+        async def do_init(self) -> None:
+            return None
+
+        async def list_runs(self, *, limit: int):
+            return []
+
+    monkeypatch.setattr(stash, 'StashManager', FakeStashManager)
+    monkeypatch.delenv('THEHARVESTER_API_KEY', raising=False)
+    client = TestClient(api.app)
+
+    unconfigured = client.get('/runs')
+    monkeypatch.setenv('THEHARVESTER_API_KEY', 'test-secret')
+    unauthenticated = client.get('/runs')
+    authenticated = client.get('/runs', headers={'X-API-Key': 'test-secret'})
+
+    assert unconfigured.status_code == 503
+    assert unauthenticated.status_code == 401
+    assert authenticated.status_code == 200

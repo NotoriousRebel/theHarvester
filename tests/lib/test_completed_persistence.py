@@ -132,3 +132,30 @@ async def test_stash_rolls_back_the_completed_run_when_a_legacy_row_fails(tmp_pa
         )
 
     assert await manager.load_run(run.run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_stash_lists_the_most_recent_completed_runs(tmp_path) -> None:
+    manager = StashManager()
+    manager.db = str(tmp_path / 'stash.sqlite')
+    await manager.do_init()
+    older = complete_run(
+        start_run('older.example'),
+        completed_at=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
+    )
+    newer = complete_run(
+        start_run('newer.example'),
+        completed_at=datetime(2026, 7, 31, 13, 0, tzinfo=UTC),
+    )
+    await manager.store_run(older)
+    await manager.store_run(newer)
+
+    assert await manager.list_runs(limit=1) == [
+        {
+            'run_id': newer.run_id,
+            'target': 'newer.example',
+            'started_at': newer.started_at.isoformat(),
+            'completed_at': '2026-07-31T13:00:00+00:00',
+            'status': 'complete',
+        }
+    ]
