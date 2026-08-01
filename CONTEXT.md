@@ -75,10 +75,6 @@ _Avoid_: Guaranteed result, module return type, source category
 An operator request to run sources that declare one or more selected source capabilities. Multiple capabilities form a union, explicit source selection remains available, and capability selection does not filter fields returned by a selected source.
 _Avoid_: Result filter, backend category, capability intersection
 
-**Source family**:
-A group of discovery sources whose observations depend on the same underlying dataset or collection mechanism. Family membership preserves source credit while preventing correlated observations from being treated as independent corroboration.
-_Avoid_: Duplicate source, provider category
-
 **Normalized evidence**:
 Provider-independent evidence extracted into theHarvester's defined fields, such as the entity, source, collection time, and derivation, without retaining unrelated response content.
 _Avoid_: Raw result, cleaned response

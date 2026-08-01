@@ -231,6 +231,15 @@ def _classify(
 
 
 class DnsValidator:
+    """Classify current DNS addressability from three resolver vantages.
+
+    A single resolver can be stale, filtered, or observing a different DNS view. Requiring
+    agreement makes the primary subdomain count less sensitive to one resolver. Synthetic
+    control names also reveal wildcard DNS, where arbitrary labels receive the same answer
+    as a discovered candidate. This classifies DNS evidence only; it does not claim that an
+    HTTP service, port, or application is reachable.
+    """
+
     def __init__(
         self,
         vantages: tuple[ResolverVantage, ...],
@@ -288,7 +297,13 @@ class DnsValidator:
         *,
         deterministic_exact_names: tuple[str, ...] = (),
     ) -> ValidationResult:
-        """Trust deterministic_exact_names only as caller-supplied exact-node evidence."""
+        """Validate in-scope candidates and retain every resolver and wildcard observation.
+
+        For example, if ``api.example.com`` returns the same records as a fresh random name
+        under ``example.com``, it is wildcard-indistinguishable rather than a confirmed
+        addressable subdomain. Caller-supplied exact-node evidence may distinguish that name,
+        but is never inferred from the wildcard response itself.
+        """
         normalized_target = normalize_hostname(target)
         if normalized_target is None:
             raise ValueError('target must be a hostname')

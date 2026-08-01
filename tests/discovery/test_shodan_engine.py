@@ -19,6 +19,9 @@ class TestShodanEngine:
             async def do_init(self) -> None:
                 return None
 
+            async def store_run(self, _run, **_kwargs) -> None:
+                return None
+
             async def store_all(self, domain, all, res_type, source) -> None:  # noqa: A002
                 return None
 

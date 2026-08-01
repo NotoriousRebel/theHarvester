@@ -17,6 +17,8 @@ from starlette.staticfiles import StaticFiles
 
 from theHarvester import __main__
 from theHarvester.lib.api.additional_endpoints import router as additional_router
+from theHarvester.lib.output import legacy_json_result
+from theHarvester.lib.run import RunResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,7 @@ class QueryResponse(BaseModel):
     ips: list[str] = Field(default_factory=list, description='List of IPs')
     emails: list[str] = Field(default_factory=list, description='List of emails')
     hosts: list[str] = Field(default_factory=list, description='List of hosts')
+    run: dict[str, Any] | None = Field(None, description='Completed enumeration run')
 
 
 class ErrorResponse(BaseModel):
@@ -199,6 +202,7 @@ async def getsources(request: Request) -> Response:
 # Define Pydantic model for DNS brute force response
 class DnsBruteResponse(BaseModel):
     dns_bruteforce: list[str] = Field(default_factory=list, description='List of DNS brute force results')
+    run: dict[str, Any] | None = Field(None, description='Completed enumeration run')
 
 
 @app.get(
@@ -235,9 +239,10 @@ async def dnsbrute(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Domain must be at least 3 characters long')
 
         # Call the main function with the provided parameters
-        dns_bruteforce = await __main__.start(
+        dns_bruteforce, completed_run = await __main__.start(
             argparse.Namespace(
                 dns_brute=True,
+                dns_brute_only=True,
                 dns_lookup=False,
                 dns_server=False,
                 dns_tld=False,
@@ -246,6 +251,8 @@ async def dnsbrute(
                 google_dork=False,
                 limit=500,
                 proxies=False,
+                quiet=False,
+                screenshot='',
                 shodan=False,
                 source=','.join([]),
                 start=0,
@@ -253,10 +260,11 @@ async def dnsbrute(
                 wordlist='',
                 api_scan=False,
                 dns_resolve=dns_resolve,
+                include_run=True,
             )
         )
 
-        return JSONResponse({'dns_bruteforce': dns_bruteforce})
+        return JSONResponse({'dns_bruteforce': dns_bruteforce, 'run': completed_run.to_dict()})
 
     except HTTPException as e:
         # Re-raise HTTP exceptions
@@ -330,19 +338,10 @@ async def query(
             )
 
         # Call the main function with the provided parameters
-        (
-            asns,
-            iurls,
-            twitter_people_list,
-            linkedin_people_list,
-            linkedin_links,
-            aurls,
-            aips,
-            aemails,
-            ahosts,
-        ) = await __main__.start(
+        start_result = await __main__.start(
             argparse.Namespace(
                 dns_brute=dns_brute,
+                dns_brute_only=False,
                 dns_lookup=dns_lookup,
                 dns_server=dns_server,
                 domain=domain,
@@ -358,23 +357,37 @@ async def query(
                 dns_resolve=dns_resolve,
                 quiet=False,
                 screenshot='',
+                include_run=True,
             )
         )
+        (
+            asns,
+            iurls,
+            twitter_people_list,
+            linkedin_people_list,
+            linkedin_links,
+            aurls,
+            aips,
+            aemails,
+            ahosts,
+            completed_run,
+        ) = start_result
 
         # Return the results using the Pydantic model
-        return JSONResponse(
-            {
-                'asns': asns,
-                'interesting_urls': iurls,
-                'twitter_people': twitter_people_list,
-                'linkedin_people': linkedin_people_list,
-                'linkedin_links': linkedin_links,
-                'trello_urls': aurls,
-                'ips': aips,
-                'emails': aemails,
-                'hosts': ahosts,
-            }
-        )
+        response_data = {
+            'asns': asns,
+            'interesting_urls': iurls,
+            'twitter_people': twitter_people_list,
+            'linkedin_people': linkedin_people_list,
+            'linkedin_links': linkedin_links,
+            'trello_urls': aurls,
+            'ips': aips,
+            'emails': aemails,
+            'hosts': ahosts,
+        }
+        if not isinstance(completed_run, RunResult):
+            raise RuntimeError('query did not return a completed run')
+        return JSONResponse(legacy_json_result(completed_run, response_data))
     except HTTPException as e:
         # Re-raise HTTP exceptions
         raise e

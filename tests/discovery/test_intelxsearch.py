@@ -122,9 +122,8 @@ async def test_orchestrator_stores_intelx_hostnames(monkeypatch: pytest.MonkeyPa
         async def do_init(self) -> None:
             return None
 
-        async def store_all(self, _domain: str, values: list[str], result_type: str, _source: str) -> None:
-            if result_type == 'host':
-                stored_hosts.append(set(values))
+        async def store_run(self, _run, *, legacy_results=()) -> None:
+            stored_hosts.extend(set(values) for _domain, values, result_type, _source in legacy_results if result_type == 'host')
 
     class _Intelx:
         def __init__(self, _domain: str) -> None:
@@ -134,7 +133,7 @@ async def test_orchestrator_stores_intelx_hostnames(monkeypatch: pytest.MonkeyPa
             return None
 
         async def get_hostnames(self) -> list[str]:
-            return ['example.com', 'api.example.com']
+            return ['example.com', 'api.example.com', 'example.com.evil.test']
 
         async def get_emails(self) -> list[str]:
             return []

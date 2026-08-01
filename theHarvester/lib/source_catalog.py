@@ -27,7 +27,6 @@ _ROUTE_CAPABILITIES = {
 class SourceSpec:
     name: str
     routes: frozenset[ResultRoute]
-    family: str
     queries_provider_descendants: bool = False
 
     @property
@@ -38,13 +37,11 @@ class SourceSpec:
 def _spec(
     name: str,
     *routes: ResultRoute,
-    family: str | None = None,
     queries_provider_descendants: bool = False,
 ) -> SourceSpec:
     return SourceSpec(
         name=name,
         routes=frozenset(routes),
-        family=family if family is not None else name,
         queries_provider_descendants=queries_provider_descendants,
     )
 
@@ -57,16 +54,11 @@ _SPECS = (
     _spec('bufferoverun', ResultRoute.HOSTS, ResultRoute.IPS, queries_provider_descendants=True),
     _spec('builtwith', ResultRoute.HOSTS, ResultRoute.INTERESTING_URLS),
     _spec('censys', ResultRoute.HOSTS, ResultRoute.EMAILS),
-    _spec(
-        'certspotter',
-        ResultRoute.HOSTS,
-        family='certificate-transparency',
-        queries_provider_descendants=True,
-    ),
-    _spec('chaos', ResultRoute.HOSTS, family='projectdiscovery', queries_provider_descendants=True),
+    _spec('certspotter', ResultRoute.HOSTS, queries_provider_descendants=True),
+    _spec('chaos', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('commoncrawl', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('criminalip', ResultRoute.HOSTS, ResultRoute.IPS, ResultRoute.ASNS, queries_provider_descendants=True),
-    _spec('crtsh', ResultRoute.HOSTS, family='certificate-transparency', queries_provider_descendants=True),
+    _spec('crtsh', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('dehashed', ResultRoute.IPS),
     _spec('dnsdb', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('dnsdumpster', ResultRoute.HOSTS, ResultRoute.IPS, queries_provider_descendants=True),
@@ -97,7 +89,7 @@ _SPECS = (
     _spec('securityscorecard', ResultRoute.HOSTS, ResultRoute.IPS),
     _spec('sherlockeye', ResultRoute.HOSTS, ResultRoute.EMAILS, ResultRoute.IPS),
     _spec('shodan', ResultRoute.HOSTS),
-    _spec('shodanInternetDB', ResultRoute.HOSTS, ResultRoute.IPS, family='shodan'),
+    _spec('shodanInternetDB', ResultRoute.HOSTS, ResultRoute.IPS),
     _spec('subdomaincenter', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('subdomainfinderc99', ResultRoute.HOSTS, queries_provider_descendants=True),
     _spec('thc', ResultRoute.HOSTS, queries_provider_descendants=True),

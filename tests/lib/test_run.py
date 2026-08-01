@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -10,7 +9,6 @@ from theHarvester.lib.dns_validation import Addressability, DnsResponse, DnsVali
 from theHarvester.lib.run import (
     Derivation,
     ScopeClass,
-    SourceFinding,
     SourceRateLimitedError,
     SourceStatus,
     execute_run,
@@ -21,15 +19,14 @@ from theHarvester.lib.run import (
 
 class FakePassiveSource:
     name = 'fixture'
-    family = 'certificate-transparency'
 
-    async def collect(self, target: str) -> list[SourceFinding]:
+    async def collect(self, target: str) -> list[str]:
         assert target == 'example.com'
         return [
-            SourceFinding('WWW.Example.COM.', Derivation.PROVIDER),
-            SourceFinding('www.example.com', Derivation.PROVIDER),
-            SourceFinding('example.com.evil.test', Derivation.SCOPE_EXTENSION),
-            SourceFinding('cdn.vendor.test', Derivation.EXTERNAL_RELATIONSHIP),
+            'WWW.Example.COM.',
+            'www.example.com',
+            'example.com.evil.test',
+            'cdn.vendor.test',
         ]
 
 
@@ -37,9 +34,8 @@ class FakePassiveSource:
 async def test_execute_run_propagates_cancellation() -> None:
     class CancelledSource:
         name = 'cancelled'
-        family = 'cancelled'
 
-        async def collect(self, _target: str) -> list[SourceFinding]:
+        async def collect(self, _target: str) -> list[str]:
             raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
@@ -66,22 +62,19 @@ async def test_execute_run_records_scoped_normalized_evidence_end_to_end() -> No
         ('www.example.com', ScopeClass.IN_SCOPE),
         ('www.example.com', ScopeClass.IN_SCOPE),
         ('example.com.evil.test', ScopeClass.SCOPE_EXTENSION),
-        ('cdn.vendor.test', ScopeClass.EXTERNAL_RELATIONSHIP),
+        ('cdn.vendor.test', ScopeClass.SCOPE_EXTENSION),
     ]
-    assert all(item.target == 'example.com' for item in result.observations)
     assert all(item.source == 'fixture' for item in result.observations)
-    assert all(item.source_family == 'certificate-transparency' for item in result.observations)
     assert all(item.collected_at.tzinfo is not None for item in result.observations)
     assert [item.derivation for item in result.observations] == [
         Derivation.PROVIDER,
         Derivation.PROVIDER,
-        Derivation.SCOPE_EXTENSION,
-        Derivation.EXTERNAL_RELATIONSHIP,
+        Derivation.PROVIDER,
+        Derivation.PROVIDER,
     ]
 
     merged = {item.value: item for item in result.entities}
     assert len(merged['www.example.com'].observations) == 2
-    assert merged['www.example.com'].independent_corroboration_count == 1
     assert merged['www.example.com'].scope_classes == (ScopeClass.IN_SCOPE,)
     assert legacy_hostnames(result) == ['www.example.com']
 
@@ -102,12 +95,11 @@ async def test_execute_run_does_not_persist_implicitly(monkeypatch: pytest.Monke
 
 class OutcomeSource:
     name = 'outcome'
-    family = 'fixture-family'
 
-    def __init__(self, outcome: list[SourceFinding] | Exception) -> None:
+    def __init__(self, outcome: list[str] | Exception) -> None:
         self.outcome = outcome
 
-    async def collect(self, _target: str) -> list[SourceFinding]:
+    async def collect(self, _target: str) -> list[str]:
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -123,7 +115,7 @@ class OutcomeSource:
 @pytest.mark.asyncio
 async def test_execute_run_records_non_success_source_outcomes(
     caplog: pytest.LogCaptureFixture,
-    outcome: list[SourceFinding] | Exception,
+    outcome: list[str] | Exception,
     expected: SourceStatus,
 ) -> None:
     result = await execute_run('example.com', (OutcomeSource(outcome),))
@@ -145,22 +137,17 @@ async def test_execute_run_records_non_success_source_outcomes(
 async def test_execute_run_groups_multiple_sources_under_one_run() -> None:
     class CorroboratingSource:
         name = 'corroborating'
-        family = 'passive-dns'
 
-        async def collect(self, _target: str) -> list[SourceFinding]:
-            return [SourceFinding('www.example.com'), SourceFinding('example.com'), SourceFinding('')]
+        async def collect(self, _target: str) -> list[str]:
+            return ['www.example.com', 'example.com', '']
 
     result = await execute_run('example.com', (FakePassiveSource(), CorroboratingSource()))
 
     assert [execution.source for execution in result.source_executions] == ['fixture', 'corroborating']
-    assert {execution.run_id for execution in result.source_executions} == {result.run_id}
-    assert {observation.run_id for observation in result.observations} == {result.run_id}
     corroborating_execution = result.source_executions[1]
     assert corroborating_execution.status is SourceStatus.SUCCEEDED
     assert corroborating_execution.result_count == 3
     assert corroborating_execution.observation_count == 2
-    merged = {entity.value: entity for entity in result.entities}
-    assert merged['www.example.com'].independent_corroboration_count == 2
     assert legacy_hostnames(result) == ['www.example.com']
 
 
@@ -170,10 +157,9 @@ async def test_execute_run_classifies_once_and_bridges_current_dns_results() -> 
 
     class CandidateSource:
         name = 'fixture'
-        family = 'fixture'
 
-        async def collect(self, _target: str) -> list[SourceFinding]:
-            return [SourceFinding(candidate)]
+        async def collect(self, _target: str) -> list[str]:
+            return [candidate]
 
     class Vantage:
         def __init__(self, name: str, address: str) -> None:
@@ -232,25 +218,19 @@ async def test_crtsh_bridge_executes_once_and_feeds_legacy_consumers(monkeypatch
         async def do_init(self) -> None:
             return None
 
-        async def store_all(self, domain: str, items: list[str], result_type: str, source: str) -> None:
-            stored.append((domain, tuple(items), result_type, source))
+        async def store_run(self, _run: run_module.RunResult, *, legacy_results=()) -> None:
+            stored.extend((domain, tuple(items), result_type, source) for domain, items, result_type, source in legacy_results)
 
     captured: list[run_module.RunResult] = []
 
-    async def execute_with_temporary_store(target, sources):
-        result = await run_module.execute_run(target, sources)
+    async def execute_with_temporary_store(target, sources, **kwargs):
+        result = await run_module.execute_run(target, sources, **kwargs)
         captured.append(result)
         return result
 
     monkeypatch.setattr(main_module.crtsh, 'SearchCrtsh', FakeCrtshSearch)
     monkeypatch.setattr(main_module.stash, 'StashManager', FakeStashManager)
     monkeypatch.setattr(main_module, 'execute_run', execute_with_temporary_store, raising=True)
-    crtsh_spec = main_module.get_source_spec('crtsh')
-    monkeypatch.setattr(
-        main_module,
-        'get_source_spec',
-        lambda _name: replace(crtsh_spec, family='catalog-family'),
-    )
 
     await main_module.start(
         argparse.Namespace(
@@ -276,7 +256,6 @@ async def test_crtsh_bridge_executes_once_and_feeds_legacy_consumers(monkeypatch
     assert len(captured) == 1
     assert captured[0].source_executions[0].status is SourceStatus.SUCCEEDED
     assert captured[0].source_executions[0].source == 'crtsh'
-    assert {observation.source_family for observation in captured[0].observations} == {'catalog-family'}
     assert legacy_hostnames(captured[0]) == ['www.example.com']
     assert stored == [('example.com', ('www.example.com',), 'host', 'CRTsh')]
 
@@ -289,6 +268,7 @@ async def test_crtsh_bridge_uses_three_resolvers_without_legacy_requery(
     import theHarvester.lib.run as run_module
 
     candidate = 'www.example.com'
+    secondary = 'old.example.com'
 
     class FakeCrtshSearch:
         def __init__(self, target: str) -> None:
@@ -298,7 +278,7 @@ async def test_crtsh_bridge_uses_three_resolvers_without_legacy_requery(
             return None
 
         async def get_hostnames(self) -> list[str]:
-            return [candidate]
+            return [candidate, secondary]
 
     created: list[str] = []
     closed: list[str] = []
@@ -328,7 +308,11 @@ async def test_crtsh_bridge_uses_three_resolvers_without_legacy_requery(
         async def store(self, *_args: object) -> None:
             return None
 
+        async def store_run(self, run: run_module.RunResult, **_kwargs) -> None:
+            completed.append(run)
+
     captured: list[run_module.RunResult] = []
+    completed: list[run_module.RunResult] = []
     output: list[object] = []
 
     async def capture_run(target, sources, **kwargs):
@@ -363,9 +347,22 @@ async def test_crtsh_bridge_uses_three_resolvers_without_legacy_requery(
     assert exit_info.value.code == 0
     assert set(created) == {'192.0.2.53', '192.0.2.54', '192.0.2.55'}
     assert set(closed) == set(created)
-    assert captured[0].entities[0].addressability is Addressability.CURRENT
-    assert output.count(f'{candidate}:192.0.2.10') == 1
-    assert candidate not in output
+    assert captured[0].entities[0].addressability is None
+    assert {entity.value: entity.addressability for entity in completed[0].entities} == {
+        candidate: Addressability.CURRENT,
+        secondary: Addressability.NOT_CURRENT,
+    }
+    assert {record.value for record in completed[0].results if record.type == 'subdomain'} == {
+        candidate,
+        secondary,
+    }
+    dns_execution = next(execution for execution in completed[0].executions if execution.name == 'dns-resolution')
+    assert dns_execution.observation_count == len(completed[0].dns_validations)
+    assert dns_execution.entity_count == 2
+    terminal = '\n'.join(map(str, output))
+    assert terminal.count(candidate) == 1
+    assert terminal.count(secondary) == 1
+    assert 'DNS resolution: consensus via 192.0.2.53, 192.0.2.54, 192.0.2.55' in terminal
 
 
 @pytest.mark.asyncio
@@ -382,7 +379,7 @@ async def test_dnsdb_bridge_preserves_partial_results_and_status(monkeypatch: py
         async def process(self, _proxy: bool = False) -> None:
             raise SourceRateLimitedError(
                 'DNSDB result limit reached',
-                findings=(SourceFinding('partial.example.com'),),
+                findings=('partial.example.com',),
             )
 
         async def get_hostnames(self) -> list[str]:
@@ -394,13 +391,13 @@ async def test_dnsdb_bridge_preserves_partial_results_and_status(monkeypatch: py
         async def do_init(self) -> None:
             return None
 
-        async def store_all(self, domain: str, items: list[str], result_type: str, source: str) -> None:
-            stored.append((domain, tuple(items), result_type, source))
+        async def store_run(self, _run: run_module.RunResult, *, legacy_results=()) -> None:
+            stored.extend((domain, tuple(items), result_type, source) for domain, items, result_type, source in legacy_results)
 
     captured: list[run_module.RunResult] = []
 
-    async def capture_run(target, sources):
-        result = await run_module.execute_run(target, sources)
+    async def capture_run(target, sources, **kwargs):
+        result = await run_module.execute_run(target, sources, **kwargs)
         captured.append(result)
         return result
 

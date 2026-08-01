@@ -9,7 +9,7 @@ import aiohttp
 from theHarvester import __version__
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib.core import AsyncFetcher, Core
-from theHarvester.lib.run import SourceFinding, SourceIncompleteError, SourceRateLimitedError
+from theHarvester.lib.run import SourceIncompleteError, SourceRateLimitedError
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,8 @@ class SearchDNSDB:
             return hostname
         return None
 
-    def _partial_findings(self) -> tuple[SourceFinding, ...]:
-        return tuple(SourceFinding(hostname) for hostname in sorted(self.totalhosts))
+    def _partial_findings(self) -> tuple[str, ...]:
+        return tuple(sorted(self.totalhosts))
 
     async def do_search(self) -> None:
         query = quote(f'*.{self.target_domain}', safe='*.')

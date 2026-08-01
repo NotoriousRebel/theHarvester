@@ -243,7 +243,6 @@ async def test_incomplete_stream_status_keeps_partial_results_in_run(
             LegacyHostnameSource(
                 name='dnsdb',
                 legacy_name='dnsdb',
-                family='dnsdb',
                 search=search,
             ),
         ),

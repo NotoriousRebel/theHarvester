@@ -7,9 +7,9 @@ import secrets
 import string
 import sys
 import time
-import traceback
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -83,14 +83,34 @@ from theHarvester.lib import hostchecker, stash
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
 from theHarvester.lib.dns_validation import AioDnsResolverVantage, DnsValidator
 from theHarvester.lib.hostnames import normalize_scoped_hostname
-from theHarvester.lib.output import configure_logging, output_logger, print_linkedin_sections, print_section, sorted_unique
+from theHarvester.lib.output import (
+    configure_logging,
+    format_run_terminal,
+    legacy_json_result,
+    legacy_report_hosts,
+    output_logger,
+    run_result_jsonl,
+    run_result_xml,
+    sorted_unique,
+)
 from theHarvester.lib.run import (
+    ActivityClass,
+    Derivation,
+    DiscoveryObservation,
+    ExecutionStatus,
     LegacyHostnameSource,
+    ResultRecord,
+    RunExecution,
     RunResult,
+    ScopeClass,
     SourceStatus,
+    add_run_evidence,
+    complete_run,
     execute_run,
     legacy_dns_results,
     legacy_hostnames,
+    start_run,
+    validate_run,
 )
 from theHarvester.lib.source_catalog import ResultRoute, get_source_spec
 from theHarvester.screenshot.screenshot import ScreenShotter
@@ -101,12 +121,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _normalize_hosts_for_storage(discovered_hosts: Iterable[object], target: str) -> set[str]:
-    normalized_target = target.strip().lower().removeprefix('www.').rstrip('.')
+def _normalize_hosts_for_storage(discovered_hosts: Iterable[object], target: str, *, include_target: bool = False) -> set[str]:
+    normalized_target = target.strip().lower().rstrip('.')
     return {
         normalized
         for host in discovered_hosts
-        if (normalized := normalize_scoped_hostname(host, normalized_target)) and normalized != normalized_target
+        if (normalized := normalize_scoped_hostname(host, normalized_target))
+        and (include_target or normalized != normalized_target)
     }
 
 
@@ -238,18 +259,20 @@ async def start(rest_args: argparse.Namespace | None = None):
 
     # determines if the filename is coming from rest api or user
     rest_filename = ''
+    filename: str
     # indicates this from the rest API
     if rest_args:
         if rest_args.source and rest_args.source == 'getsources':
             return list(sorted(Core.get_supportedengines()))
-        elif rest_args.dns_brute:
+        elif rest_args.dns_brute and getattr(rest_args, 'dns_brute_only', False):
             args = rest_args
             dnsbrute = (rest_args.dns_brute, True)
+            filename = args.filename
         else:
             args = rest_args
             dnsbrute = (args.dns_brute, False)
             # We need to make sure the filename is random as to not overwrite other files
-            filename: str = args.filename
+            filename = args.filename
             alphabet = string.ascii_letters + string.digits
             rest_filename += f'{"".join(secrets.choice(alphabet) for _ in range(32))}_{filename}' if len(filename) != 0 else ''
     else:
@@ -288,7 +311,6 @@ async def start(rest_args: argparse.Namespace | None = None):
     all_ip: list = []
     all_people: list[dict[str, str]] = []
     dnslookup = args.dns_lookup
-    dnsserver = args.dns_server  # TODO arg is not used anywhere replace with resolvers wordlist arg dnsresolve
     dnsresolve: str | None = args.dns_resolve
     final_dns_resolver_list = []
     if dnsresolve is not None and len(dnsresolve) > 0:
@@ -329,10 +351,11 @@ async def start(rest_args: argparse.Namespace | None = None):
     engines: list = []
     # If the user specifies
     full: list = []
-    ips: list = []
     host_ip: list = []
     limit: int = args.limit
     shodan = args.shodan
+    screenshot_path = getattr(args, 'screenshot', '')
+    api_scan_enabled = getattr(args, 'api_scan', False)
     start: int = args.start
     all_urls: list = []
     vhost: list = []
@@ -351,12 +374,69 @@ async def start(rest_args: argparse.Namespace | None = None):
 
     interesting_urls = []
     total_asns = []
+    run_result = start_run(word)
+    word = run_result.target
+    source_executions: list[RunExecution] = []
+    source_observations: list[DiscoveryObservation] = []
+    selected_executions: list[RunExecution] = []
+    selected_hostname_observations: list[DiscoveryObservation] = []
+    result_sources: dict[tuple[str, str], set[str]] = {}
+    pending_legacy_results: list[tuple[str, tuple[object, ...], str, str]] = []
 
-    async def store(
+    def _result_value(value: object) -> str:
+        return value if isinstance(value, str) else ujson.dumps(value, sort_keys=True)
+
+    def _remember_results(result_type: str, values: Iterable[object], source: str) -> None:
+        for value in values:
+            result_sources.setdefault((result_type, _result_value(value)), set()).add(source)
+
+    def _defer_legacy_results(values: Iterable[object], result_type: str, source: str) -> None:
+        pending_legacy_results.append((word, tuple(values), result_type, source))
+
+    def _result_record(result_type: str, value: object, *fallback_sources: str) -> ResultRecord:
+        normalized_value = _result_value(value)
+        sources = result_sources.get((result_type, normalized_value), set(fallback_sources))
+        return ResultRecord(result_type, normalized_value, tuple(sorted(sources)))
+
+    def _completed_execution(
+        name: str,
+        activity: ActivityClass,
+        started_at: datetime,
+        started: float,
+        result_count: int,
+        error: Exception | None = None,
+        *,
+        partial: bool = False,
+        observation_count: int = 0,
+        entity_count: int = 0,
+    ) -> RunExecution:
+        status = (
+            ExecutionStatus.PARTIAL
+            if partial
+            else ExecutionStatus.FAILED
+            if error
+            else ExecutionStatus.SUCCEEDED
+            if result_count
+            else ExecutionStatus.EMPTY
+        )
+        return RunExecution(
+            name,
+            activity,
+            status,
+            (time.perf_counter() - started) * 1000,
+            result_count,
+            observation_count=observation_count,
+            entity_count=entity_count,
+            error_type=type(error).__name__ if error else None,
+            started_at=started_at,
+            completed_at=datetime.now(UTC),
+        )
+
+    async def _store(
         search_engine: Any,
         source: str,
         run_result: RunResult | None = None,
-    ) -> None:
+    ) -> tuple[int, int, int]:
         """Process a source and persist its declared consolidated result routes.
 
         :param search_engine: search engine to fetch details from
@@ -370,15 +450,16 @@ async def start(rest_args: argparse.Namespace | None = None):
             except Exception:
                 logger.exception(f'Source {source} failed')
                 raise
-        db_stash = stash.StashManager()
         source_spec = get_source_spec(source)
         routes = source_spec.routes
+        result_count = 0
+        observation_count = 0
+        entity_count = 0
 
         if source:
             output_logger.info(f'[*] Searching {source[0].upper() + source[1:]}. ')
 
         if ResultRoute.HOSTS in routes:
-            has_dns_validation = run_result is not None and bool(run_result.dns_validations)
             if run_result is not None and run_result.dns_validations:
                 resolved_pair, host_names, temp_ips = legacy_dns_results(run_result, source_spec.name)
                 all_ip.extend(temp_ips)
@@ -387,98 +468,129 @@ async def start(rest_args: argparse.Namespace | None = None):
                 host_names = legacy_hostnames(run_result, source_spec.name)
             else:
                 discovered_hosts = await search_engine.get_hostnames()
-                if source == 'intelx':
-                    host_names = list(discovered_hosts)
-                else:
-                    host_names = list(_normalize_hosts_for_storage(discovered_hosts, word))
-            if not has_dns_validation:
-                if source != 'hackertarget' and source != 'pentesttools' and source != 'rapiddns':
-                    # If a source is inside this conditional, it means the hosts returned must be resolved to obtain ip
-                    # This should only be checked if --dns-resolve has a wordlist
-                    if dnsresolve is None or len(final_dns_resolver_list) > 0:
-                        # indicates that -r was passed in if dnsresolve is None
-                        full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
-                        # If full, this is only getting resolved hosts
-                        (
-                            resolved_pair,
-                            _temp_hosts,
-                            temp_ips,
-                        ) = await full_hosts_checker.check()
-                        all_ip.extend(temp_ips)
-                        full.extend(resolved_pair)
-                        # full.extend(temp_hosts)
-                    else:
-                        full.extend(host_names)
-                else:
-                    full.extend(host_names)
+                host_names = list(_normalize_hosts_for_storage(discovered_hosts, word, include_target=source == 'intelx'))
+            if run_result is None or not run_result.dns_validations:
+                full.extend(host_names)
             all_hosts.extend(host_names)
-            await db_stash.store_all(word, all_hosts, 'host', source)
+            _remember_results('subdomain', host_names, source_spec.name)
+            _defer_legacy_results(all_hosts, 'host', source)
+            result_count += len(host_names)
+            observation_count = len(host_names)
+            entity_count = len(set(host_names))
+            if run_result is None:
+                collected_at = datetime.now(UTC)
+                source_observations.extend(
+                    DiscoveryObservation(
+                        value=hostname,
+                        source=source_spec.name,
+                        derivation=Derivation.PROVIDER,
+                        collected_at=collected_at,
+                        scope_class=ScopeClass.IN_SCOPE,
+                    )
+                    for hostname in host_names
+                )
 
         if ResultRoute.EMAILS in routes:
             email_list = await search_engine.get_emails()
             all_emails.extend(email_list)
-            await db_stash.store_all(word, email_list, 'email', source)
+            _remember_results('email', email_list, source_spec.name)
+            _defer_legacy_results(email_list, 'email', source)
+            result_count += len(email_list)
 
         if ResultRoute.IPS in routes:
             ips_list = await search_engine.get_ips()
             all_ip.extend(ips_list)
-            await db_stash.store_all(word, all_ip, 'ip', source)
+            _remember_results('ip', ips_list, source_spec.name)
+            _defer_legacy_results(all_ip, 'ip', source)
+            result_count += len(ips_list)
 
         if ResultRoute.PEOPLE in routes:
             people_list = await search_engine.get_people()
             all_people.extend(people_list)
-            await db_stash.store_all(word, people_list, 'people', source)
+            _remember_results('person', people_list, source_spec.name)
+            _defer_legacy_results(people_list, 'people', source)
+            result_count += len(people_list)
 
         if ResultRoute.LINKS in routes:
             links = await search_engine.get_links()
             linkedin_links_tracker.extend(links)
+            _remember_results('url', links, source_spec.name)
             if len(links) > 0:
-                await db.store_all(word, links, 'linkedinlinks', source)
+                _defer_legacy_results(links, 'linkedinlinks', source)
+            result_count += len(links)
 
         if ResultRoute.INTERESTING_URLS in routes:
             iurls = await search_engine.get_interestingurls()
             interesting_urls.extend(iurls)
+            _remember_results('url', iurls, source_spec.name)
             if len(iurls) > 0:
-                await db.store_all(word, iurls, 'interestingurls', source)
+                _defer_legacy_results(iurls, 'interestingurls', source)
+            result_count += len(iurls)
 
         if ResultRoute.ASNS in routes:
             fasns = await search_engine.get_asns()
             total_asns.extend(fasns)
+            _remember_results('asn', fasns, source_spec.name)
             if len(fasns) > 0:
-                await db.store_all(word, fasns, 'asns', source)
+                _defer_legacy_results(fasns, 'asns', source)
+            result_count += len(fasns)
         if run_result is None:
             logger.info(f'Source {source} completed')
+        return result_count, observation_count, entity_count
+
+    def store(search_engine: Any, source: str):
+        async def run_source() -> None:
+            started_at = datetime.now(UTC)
+            started = time.perf_counter()
+            result_count = 0
+            observation_count = 0
+            entity_count = 0
+            error: Exception | None = None
+            try:
+                result_count, observation_count, entity_count = await _store(search_engine, source)
+            except Exception as source_error:
+                error = source_error
+                raise
+            finally:
+                source_executions.append(
+                    RunExecution(
+                        name=get_source_spec(source).name,
+                        activity=ActivityClass.PASSIVE,
+                        status=(
+                            ExecutionStatus.FAILED
+                            if error is not None
+                            else ExecutionStatus.SUCCEEDED
+                            if result_count
+                            else ExecutionStatus.EMPTY
+                        ),
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        result_count=result_count,
+                        observation_count=observation_count,
+                        entity_count=entity_count,
+                        error_type=type(error).__name__ if error else None,
+                        started_at=started_at,
+                        completed_at=datetime.now(UTC),
+                    )
+                )
+
+        return run_source()
 
     stor_lst = []
     evidence_sources: list[LegacyHostnameSource] = []
 
     async def store_evidence_sources() -> None:
-        async with AsyncExitStack() as resolver_stack:
-            dns_validator = None
-            if len(final_dns_resolver_list) == 3:
-                vantages = []
-                for nameserver in final_dns_resolver_list:
-                    vantage = AioDnsResolverVantage(nameserver)
-                    vantages.append(vantage)
-                    resolver_stack.push_async_callback(vantage.close)
-                dns_validator = DnsValidator(tuple(vantages))
-            run_result = (
-                await execute_run(word, tuple(evidence_sources), dns_validator=dns_validator)
-                if dns_validator is not None
-                else await execute_run(word, tuple(evidence_sources))
-            )
-            executions = {execution.source: execution for execution in run_result.source_executions}
-            for evidence_source in evidence_sources:
-                execution = executions[evidence_source.name]
-                if execution.status in (SourceStatus.SUCCEEDED, SourceStatus.EMPTY) or execution.observation_count:
-                    await store(evidence_source.search, evidence_source.legacy_name, run_result)
+        nonlocal run_result
+        run_result = await execute_run(word, tuple(evidence_sources), run=run_result)
+        executions = {execution.source: execution for execution in run_result.source_executions}
+        for evidence_source in evidence_sources:
+            execution = executions[evidence_source.name]
+            if execution.status in (SourceStatus.SUCCEEDED, SourceStatus.EMPTY) or execution.observation_count:
+                await _store(evidence_source.search, evidence_source.legacy_name, run_result)
 
     if args.source is not None:
         engines = Core.expand_source_selection(args.source)
         # Iterate through search engines in order
         if set(engines).issubset(Core.get_supportedengines()):
-            output_logger.info(f'\n[*] Target: {word} \n')
-
             for engineitem in engines:
                 if engineitem == 'baidu':
                     try:
@@ -651,7 +763,6 @@ async def start(rest_args: argparse.Namespace | None = None):
                             LegacyHostnameSource(
                                 name=source_spec.name,
                                 legacy_name='CRTsh',
-                                family=source_spec.family,
                                 search=crtsh_search,
                                 proxy=use_proxy,
                             )
@@ -683,7 +794,6 @@ async def start(rest_args: argparse.Namespace | None = None):
                             LegacyHostnameSource(
                                 name=source_spec.name,
                                 legacy_name='dnsdb',
-                                family=source_spec.family,
                                 search=dnsdb_search,
                                 proxy=use_proxy,
                             )
@@ -1374,269 +1484,269 @@ async def start(rest_args: argparse.Namespace | None = None):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     await handler(lst=stor_lst)
-    return_ips: list = []
-    if rest_args is not None and len(rest_filename) == 0 and rest_args.dns_brute is False:
-        # Indicates user is using REST api but not wanting output to be saved to a file
-        # cast to string so Rest API can understand the type
-        return_ips.extend([str(ip) for ip in sorted([netaddr.IPAddress(ip.strip()) for ip in set(all_ip)])])
-        # return list(set(all_emails)), return_ips, full, '', ''
-        all_hosts = [host.replace('www.', '') for host in all_hosts if host.replace('www.', '') in all_hosts]
-        all_hosts = list(sorted(set(all_hosts)))
-        return (
-            total_asns,
-            interesting_urls,
-            twitter_people_list_tracker,
-            linkedin_people_list_tracker,
-            linkedin_links_tracker,
-            all_urls,
-            all_ip,
-            all_emails,
-            all_hosts,
-        )
-    # Check to see if all_emails and all_hosts are defined.
-    try:
-        all_emails
-    except NameError:
-        output_logger.info('\n\n[!] No emails found because all_emails is not defined.\n\n ')
-        sys.exit(1)
-    try:
-        all_hosts
-    except NameError:
-        output_logger.info('\n\n[!] No hosts found because all_hosts is not defined.\n\n ')
-        sys.exit(1)
-
-    # Results
-    if len(total_asns) > 0:
-        print_section(f'\n[*] ASNS found: {len(total_asns)}', total_asns, '--------------------')
-        total_asns = sorted_unique(total_asns)
-
-    if len(interesting_urls) > 0:
-        print_section(f'\n[*] Interesting Urls found: {len(interesting_urls)}', interesting_urls, '--------------------')
-        interesting_urls = sorted_unique(interesting_urls)
-
-    if len(twitter_people_list_tracker) == 0 and 'twitter' in engines:
-        output_logger.info('\n[*] No Twitter users found.\n\n')
-    elif len(twitter_people_list_tracker) >= 1:
-        print_section(
-            '\n[*] Twitter Users found: ' + str(len(twitter_people_list_tracker)),
-            twitter_people_list_tracker,
-            '---------------------',
-        )
-        twitter_people_list_tracker = sorted_unique(twitter_people_list_tracker)
-
-    print_linkedin_sections(engines, linkedin_people_list_tracker, linkedin_links_tracker)
+    represented_sources = {execution.name for execution in (*run_result.source_executions, *source_executions)}
+    for selected_source in engines:
+        try:
+            source_name = get_source_spec(selected_source).name
+        except KeyError:
+            continue
+        if source_name not in represented_sources:
+            source_executions.append(
+                RunExecution(
+                    source_name,
+                    ActivityClass.PASSIVE,
+                    ExecutionStatus.FAILED,
+                    0,
+                    0,
+                    error_type='SourceNotStarted',
+                    started_at=run_result.started_at,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+    run_result = add_run_evidence(
+        run_result,
+        executions=source_executions,
+        observations=source_observations,
+    )
+    all_hosts = sorted_unique(all_hosts)
+    all_emails = sorted_unique(all_emails)
+    total_asns = sorted_unique(total_asns)
+    interesting_urls = sorted_unique(interesting_urls)
+    twitter_people_list_tracker = sorted_unique(twitter_people_list_tracker)
     linkedin_people_list_tracker = sorted_unique(linkedin_people_list_tracker)
     linkedin_links_tracker = sorted_unique(linkedin_links_tracker)
+    all_urls = sorted_unique(all_urls)
 
-    length_urls = len(all_urls)
-    if length_urls == 0:
-        if len(engines) >= 1 and 'trello' in engines:
-            output_logger.info('\n[*] No Trello URLs found.')
+    dns_requested = dnsresolve is None or bool(final_dns_resolver_list)
+    if dns_requested:
+        dns_started_at = datetime.now(UTC)
+        dns_started = time.perf_counter()
+        dns_error: Exception | None = None
+        resolved_pair: list[str] = []
+        dns_observation_count = 0
+        dns_entity_count = 0
+        try:
+            if len(final_dns_resolver_list) == 3:
+                async with AsyncExitStack() as resolver_stack:
+                    vantages = []
+                    for nameserver in final_dns_resolver_list:
+                        vantage = AioDnsResolverVantage(nameserver)
+                        vantages.append(vantage)
+                        resolver_stack.push_async_callback(vantage.close)
+                    run_result = await validate_run(run_result, DnsValidator(tuple(vantages)))
+                dns_observation_count = len(run_result.dns_validations)
+                dns_entity_count = sum(entity.addressability is not None for entity in run_result.entities)
+                resolved_pair, _resolved_hosts, resolved_ips = legacy_dns_results(run_result)
+            else:
+                resolved_pair, _resolved_hosts, resolved_ips = await hostchecker.Checker(
+                    all_hosts, final_dns_resolver_list
+                ).check()
+            full = sorted_unique(resolved_pair)
+            all_ip.extend(resolved_ips)
+            _remember_results('ip', resolved_ips, 'dns-resolution')
+        except Exception as error:
+            dns_error = error
+            full = []
+            logger.exception('DNS resolution failed')
+        selected_executions.append(
+            _completed_execution(
+                'dns-resolution',
+                ActivityClass.DNS,
+                dns_started_at,
+                dns_started,
+                len(full),
+                dns_error,
+                observation_count=dns_observation_count,
+                entity_count=dns_entity_count,
+            )
+        )
     else:
-        total = length_urls
-        print_section('\n[*] Trello URLs found: ' + str(total), all_urls, '--------------------')
-        all_urls = sorted_unique(all_urls)
-
-    if len(all_ip) == 0:
-        output_logger.info('\n[*] No IPs found.')
-    else:
-        output_logger.info('\n[*] IPs found: ' + str(len(all_ip)))
-        output_logger.info('-------------------')
-        # use netaddr as the list may contain ipv4 and ipv6 addresses
-        ip_list = []
-        for ip in set(all_ip):
-            try:
-                ip = ip.strip()
-                if len(ip) > 0:
-                    if '/' in ip:
-                        ip_list.append(str(netaddr.IPNetwork(ip)))
-                    else:
-                        ip_list.append(str(netaddr.IPAddress(ip)))
-            except (netaddr.core.AddrFormatError, ValueError, TypeError) as e:
-                output_logger.info(f'An exception has occurred while adding: {ip} to ip_list: {e}')
-                continue
-        ip_list = list(sorted(ip_list))
-        output_logger.info('\n'.join(map(str, ip_list)))
-        # Populate host_ip from ip_list for DNS lookup, virtual hosts search, and Shodan search
-        host_ip = ip_list
-
-    if len(all_emails) == 0:
-        output_logger.info('\n[*] No emails found.')
-    else:
-        output_logger.info('\n[*] Emails found: ' + str(len(all_emails)))
-        output_logger.info('----------------------')
-        all_emails = sorted(list(set(all_emails)))
-        output_logger.info('\n'.join(all_emails))
-
-    if len(all_people) == 0:
-        output_logger.info('\n[*] No people found.')
-    else:
-        output_logger.info('\n[*] People found: ' + str(len(all_people)))
-        output_logger.info('----------------------')
-        for person in all_people:
-            output_logger.info(person)
-
-    if len(all_hosts) == 0:
-        output_logger.info('\n[*] No hosts found.\n\n')
-    else:
-        db = stash.StashManager()
-        if dnsresolve is None or len(final_dns_resolver_list) > 0:
-            temp = set()
-            for host in full:
-                if ':' in host:
-                    # TODO parse addresses and sort them as they are IPs
-                    subdomain, addr = host.split(':', 1)
-                    if subdomain.endswith(word):
-                        temp.add(subdomain + ':' + addr)
-                        continue
-                if host.endswith(word):
-                    if host[:4] == 'www.':
-                        if host[4:] in all_hosts or host[4:] in full:
-                            temp.add(host[4:])
-                            continue
-                    temp.add(host)
-            full = list(sorted(temp))
-            full.sort(key=lambda el: el.split(':')[0])
-            output_logger.info('\n[*] Hosts found: ' + str(len(full)))
-            output_logger.info('---------------------')
-            for host in full:
-                output_logger.info(host)
-                try:
-                    if ':' in host:
-                        _, addr = host.split(':', 1)
-                        await db.store(word, addr, 'ip', 'DNS-resolver')
-                except (OSError, RuntimeError, ValueError, TypeError) as e:
-                    output_logger.info(f'An exception has occurred while attempting to insert: {host} IP into DB: {e}')
-                    continue
-        else:
-            all_hosts = [host.replace('www.', '') for host in all_hosts if host.replace('www.', '') in all_hosts]
-            all_hosts = list(sorted(set(all_hosts)))
-            output_logger.info('\n[*] Hosts found: ' + str(len(all_hosts)))
-            output_logger.info('---------------------')
-            for host in all_hosts:
-                output_logger.info(host)
+        full = list(all_hosts)
 
     # DNS brute force
+    dns_bruteforce_results: list[str] = []
     if dnsbrute and dnsbrute[0] is True:
         output_logger.info('\n[*] Starting DNS brute force.')
-        dns_force = dnssearch.DnsForce(word, final_dns_resolver_list, verbose=True)
-        resolved_pair, hosts, ips = await dns_force.run()
-        # Check if Rest API is being used if so return found hosts
-        if dnsbrute[1]:
-            return resolved_pair
-        db = stash.StashManager()
-        temp = set()
-        for host in resolved_pair:
-            if ':' in host:
-                # TODO parse addresses and sort them as they are IPs
-                subdomain, addr = host.split(':', 1)
-                if subdomain.endswith(word):
-                    # Append to full, so it's within JSON/XML at the end if output file is requested
-                    if host not in full:
-                        full.append(host)
-                        temp.add(subdomain + ':' + addr)
-                    if host not in all_hosts:
-                        all_hosts.append(host)
-                    continue
-            if host.endswith(word):
-                if host[:4] == 'www.':
-                    if host[4:] in all_hosts or host[4:] in full:
-                        continue
-                if host not in full:
-                    full.append(host)
-                    temp.add(host)
-                if host not in all_hosts:
-                    all_hosts.append(host)
-        output_logger.info('\n[*] Hosts found after DNS brute force:')
-        for sub in temp:
-            output_logger.info(sub)
-        await db.store_all(word, list(sorted(temp)), 'host', 'dns_bruteforce')
+        action_started_at = datetime.now(UTC)
+        action_started = time.perf_counter()
+        action_error: Exception | None = None
+        normalized_brute_hosts: set[str] = set()
+        try:
+            dns_bruteforce_results, brute_hosts, brute_ips = await dnssearch.DnsForce(
+                word, final_dns_resolver_list, verbose=True
+            ).run()
+            full.extend(dns_bruteforce_results)
+            normalized_brute_hosts = _normalize_hosts_for_storage(brute_hosts, word)
+            all_hosts.extend(normalized_brute_hosts)
+            all_ip.extend(brute_ips)
+            _remember_results('subdomain', normalized_brute_hosts, 'dns-brute')
+            _remember_results('ip', brute_ips, 'dns-brute')
+            _defer_legacy_results(sorted_unique(brute_hosts), 'host', 'dns_bruteforce')
+            collected_at = datetime.now(UTC)
+            selected_hostname_observations.extend(
+                DiscoveryObservation(
+                    hostname,
+                    'dns-brute',
+                    Derivation.DNS,
+                    collected_at,
+                    ScopeClass.IN_SCOPE,
+                )
+                for hostname in normalized_brute_hosts
+            )
+        except Exception as error:
+            action_error = error
+            logger.exception('DNS brute force failed')
+        selected_executions.append(
+            _completed_execution(
+                'action:dns-brute',
+                ActivityClass.DNS,
+                action_started_at,
+                action_started,
+                len(dns_bruteforce_results),
+                action_error,
+                observation_count=len(normalized_brute_hosts),
+                entity_count=len(normalized_brute_hosts),
+            )
+        )
 
-    takeover_results = dict()
-    # TakeOver Checking
-    if takeover_status:
-        output_logger.info('\n[*] Performing subdomain takeover check')
-        output_logger.info('\n[*] Subdomain Takeover checking IS ACTIVE RECON')
-        search_take = takeover.TakeOver(all_hosts)
-        await search_take.populate_fingerprints()
-        await search_take.process(proxy=use_proxy)
-        takeover_results = await search_take.get_takeover_results()
+    ip_list: list[str] = []
+    for ip in set(all_ip):
+        try:
+            value = str(ip).strip()
+            if value:
+                ip_list.append(str(netaddr.IPNetwork(value) if '/' in value else netaddr.IPAddress(value)))
+        except (netaddr.core.AddrFormatError, ValueError, TypeError):
+            logger.info(f'Ignoring invalid IP result: {ip!r}')
+    ip_list = sorted_unique(ip_list)
+    host_ip = ip_list
+
     # DNS reverse lookup
     dnsrev: list = []
     if dnslookup is True:
         output_logger.info('\n[*] Starting active queries for DNSLookup.')
-
-        # reverse each iprange in a separate task
-        __reverse_dns_tasks: dict = {}
-        for entry in host_ip:
-            __ip_range = dnssearch.serialize_ip_range(ip=entry, netmask='24')
-            if __ip_range and __ip_range not in set(__reverse_dns_tasks.keys()):
-                output_logger.info('\n[*] Performing reverse lookup on ' + __ip_range)
-                __reverse_dns_tasks[__ip_range] = asyncio.create_task(
-                    dnssearch.reverse_all_ips_in_range(
-                        iprange=__ip_range,
-                        callback=dnssearch.generate_postprocessing_callback(
-                            target=word, local_results=dnsrev, overall_results=full
-                        ),
-                        nameservers=(final_dns_resolver_list if len(final_dns_resolver_list) > 0 else None),
+        action_started_at = datetime.now(UTC)
+        action_started = time.perf_counter()
+        action_error = None
+        normalized_reverse_hosts: set[str] = set()
+        try:
+            reverse_tasks = {}
+            for entry in host_ip:
+                ip_range = dnssearch.serialize_ip_range(ip=entry, netmask='24')
+                if ip_range and ip_range not in reverse_tasks:
+                    reverse_tasks[ip_range] = asyncio.create_task(
+                        dnssearch.reverse_all_ips_in_range(
+                            iprange=ip_range,
+                            callback=dnssearch.generate_postprocessing_callback(
+                                target=word, local_results=dnsrev, overall_results=full
+                            ),
+                            nameservers=final_dns_resolver_list or None,
+                        )
                     )
+            await asyncio.gather(*reverse_tasks.values())
+            normalized_reverse_hosts = _normalize_hosts_for_storage(dnsrev, word)
+            all_hosts.extend(normalized_reverse_hosts)
+            _remember_results('subdomain', normalized_reverse_hosts, 'dns-reverse')
+            collected_at = datetime.now(UTC)
+            selected_hostname_observations.extend(
+                DiscoveryObservation(
+                    hostname,
+                    'dns-reverse',
+                    Derivation.DNS,
+                    collected_at,
+                    ScopeClass.IN_SCOPE,
                 )
-                # nameservers=list(map(str, dnsserver.split(','))) if dnsserver else None))
+                for hostname in normalized_reverse_hosts
+            )
+        except Exception as error:
+            action_error = error
+            logger.exception('Reverse DNS lookup failed')
+        selected_executions.append(
+            _completed_execution(
+                'action:dns-reverse',
+                ActivityClass.DNS,
+                action_started_at,
+                action_started,
+                len(dnsrev),
+                action_error,
+                observation_count=len(normalized_reverse_hosts),
+                entity_count=len(normalized_reverse_hosts),
+            )
+        )
 
-        # run all the reversing tasks concurrently
-        await asyncio.gather(*__reverse_dns_tasks.values())
-        output_logger.info('\n[*] Hosts found after reverse lookup (in target domain):')
-        output_logger.info('--------------------------------------------------------')
-        for xh in dnsrev:
-            output_logger.info(xh)
+    takeover_results: dict = {}
+    if takeover_status:
+        output_logger.info('\n[*] Performing subdomain takeover check (direct interaction)')
+        action_started_at = datetime.now(UTC)
+        action_started = time.perf_counter()
+        action_error = None
+        try:
+            search_take = takeover.TakeOver(sorted_unique(all_hosts))
+            await search_take.populate_fingerprints()
+            await search_take.process(proxy=use_proxy)
+            takeover_results = await search_take.get_takeover_results()
+            _remember_results(
+                'takeover',
+                (f'{host}:{status}' for host, status in takeover_results.items()),
+                'takeover',
+            )
+        except Exception as error:
+            action_error = error
+            logger.exception('Subdomain takeover check failed')
+        selected_executions.append(
+            _completed_execution(
+                'action:takeover',
+                ActivityClass.DIRECT,
+                action_started_at,
+                action_started,
+                len(takeover_results),
+                action_error,
+            )
+        )
 
     # Screenshots
     screenshot_tups = []
-    if len(args.screenshot) > 0:
-        screen_shotter = ScreenShotter(args.screenshot)
-        path_exists = screen_shotter.verify_path()
-        # Verify the path exists, if not create it or if user does not create it skips screenshot
-        if path_exists:
-            await screen_shotter.verify_installation()
-            output_logger.info(f'\nScreenshots can be found in: {screen_shotter.output}{screen_shotter.slash}')
-            start_time = time.perf_counter()
-            output_logger.info('Filtering domains for ones we can reach')
-            if dnsresolve is None or len(final_dns_resolver_list) > 0:
-                unique_resolved_domains = {url.split(':')[0] for url in full if ':' in url and 'www.' not in url}
-            else:
-                # Technically not resolved in this case, which is not ideal
-                # You should always use dns resolve when doing screenshotting
-                output_logger.info('NOTE for future use cases you should only use screenshotting in tandem with DNS resolving')
-                unique_resolved_domains = set(all_hosts)
-            if len(unique_resolved_domains) > 0:
-                # First filter out ones that didn't resolve
-                output_logger.info('Attempting to visit unique resolved domains, this is ACTIVE RECON')
-                async with Pool(10) as pool:
-                    results = await pool.map(screen_shotter.visit, list(unique_resolved_domains))
-                    # Filter out domains that we couldn't connect to
-                    unique_resolved_domains_list = list(sorted({tup[0] for tup in results if len(tup[1]) > 0}))
-                async with Pool(3) as pool:
-                    output_logger.info(f'Length of unique resolved domains: {len(unique_resolved_domains_list)} chunking now!\n')
-                    # If you have the resources, you could make the function faster by increasing the chunk number
-                    chunk_number = 14
-                    for chunk in screen_shotter.chunk_list(unique_resolved_domains_list, chunk_number):
-                        try:
+    if screenshot_path:
+        action_started_at = datetime.now(UTC)
+        action_started = time.perf_counter()
+        action_error = None
+        try:
+            screen_shotter = ScreenShotter(screenshot_path)
+            if screen_shotter.verify_path():
+                await screen_shotter.verify_installation()
+                output_logger.info(f'\nScreenshots can be found in: {screen_shotter.output}{screen_shotter.slash}')
+                unique_resolved_domains = (
+                    {url.split(':')[0] for url in full if ':' in url and 'www.' not in url} if dns_requested else set(all_hosts)
+                )
+                if unique_resolved_domains:
+                    output_logger.info('Attempting to visit unique resolved domains, this is direct interaction')
+                    async with Pool(10) as pool:
+                        reachable = await pool.map(screen_shotter.visit, list(unique_resolved_domains))
+                    reachable_domains = sorted({item[0] for item in reachable if item[1]})
+                    async with Pool(3) as pool:
+                        for chunk in screen_shotter.chunk_list(reachable_domains, 14):
                             screenshot_tups.extend(await pool.map(screen_shotter.take_screenshot, chunk))
-                        except Exception as ee:
-                            output_logger.info(f'An exception has occurred while mapping: {ee}')
-            end = time.perf_counter()
-            # There is probably an easier way to do this
-            total = int(end - start_time)
-            mon, sec = divmod(total, 60)
-            hr, mon = divmod(mon, 60)
-            total_time = f'{mon:02d}:{sec:02d}'
-            output_logger.info(f'Finished taking screenshots in {total_time} seconds')
-            output_logger.info('[+] Note there may be leftover chrome processes you may have to kill manually\n')
+            _remember_results('screenshot', screenshot_tups, 'screenshot')
+        except Exception as error:
+            action_error = error
+            logger.exception('Screenshot capture failed')
+        selected_executions.append(
+            _completed_execution(
+                'action:screenshot',
+                ActivityClass.DIRECT,
+                action_started_at,
+                action_started,
+                len(screenshot_tups),
+                action_error,
+            )
+        )
 
     # Shodan
     shodanres = []
     if shodan is True:
         output_logger.info('[*] Searching Shodan. ')
+        action_started_at = datetime.now(UTC)
+        action_started = time.perf_counter()
+        shodan_errors: list[Exception] = []
         try:
             for ip in host_ip:
                 try:
@@ -1647,7 +1757,6 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                     # Check if the result is a string (error message)
                     if isinstance(shodandict[ip], str):
-                        output_logger.info(f'{ip}: {shodandict[ip]}')
                         continue
 
                     # Process the results if it's a dictionary
@@ -1660,113 +1769,39 @@ async def start(rest_args: argparse.Namespace | None = None):
                                 value = ', '.join(map(str, value))
                             rowdata.append(value)
                         shodanres.append(rowdata)
-                        output_logger.info(ujson.dumps(shodandict[ip], indent=4, sort_keys=True))
-                        output_logger.info('\n')
+                        _remember_results('shodan', (rowdata,), 'shodan')
                 except Exception as ip_error:
+                    shodan_errors.append(ip_error)
                     output_logger.info(f'[SHODAN-error] Error searching {ip}: {ip_error}')
                     continue
         except Exception as e:
+            shodan_errors.append(e)
             output_logger.info(f'[!] An error occurred with Shodan: {e} ')
-    else:
-        pass
-
-    if filename != '':
-        output_logger.info('\n[*] Reporting started.')
-        try:
-            if len(rest_filename) == 0:
-                filename = filename.rsplit('.', 1)[0] + '.xml'
-            else:
-                filename = 'theHarvester/app/static/' + rest_filename.rsplit('.', 1)[0] + '.xml'
-            # XML REPORT SECTION
-            async with await anyio.open_file(filename, 'w+') as file:
-                await file.write('<?xml version="1.0" encoding="UTF-8"?><theHarvester>')
-                sanitized_args = [sanitize_for_xml(f'"{arg}"' if ' ' in arg else arg) for arg in sys.argv[1:]]
-                await file.write('<cmd>' + ' '.join(sanitized_args) + '</cmd>')
-                for email in all_emails:
-                    await file.write('<email>' + sanitize_for_xml(email) + '</email>')
-                for x in full:
-                    host, ip = x.split(':', 1) if ':' in x else (x, '')
-                    if ip and len(ip) > 3:
-                        await file.write(
-                            f'<host><ip>{sanitize_for_xml(ip)}</ip><hostname>{sanitize_for_xml(host)}</hostname></host>'
-                        )
-                    else:
-                        await file.write(f'<host>{sanitize_for_xml(host)}</host>')
-                for x in vhost:
-                    host, ip = x.split(':', 1) if ':' in x else (x, '')
-                    if ip and len(ip) > 3:
-                        await file.write(
-                            f'<vhost><ip>{sanitize_for_xml(ip)} </ip><hostname>{sanitize_for_xml(host)}</hostname></vhost>'
-                        )
-                    else:
-                        await file.write(f'<vhost>{sanitize_for_xml(host)}</vhost>')
-                # TODO add Shodan output into XML report
-                await file.write('</theHarvester>')
-                output_logger.info('[*] XML File saved.')
-        except (OSError, ValueError, TypeError, UnicodeEncodeError) as error:
-            output_logger.info(f'[!] An error occurred while saving the XML file: {error}')
-
-        try:
-            # JSON REPORT SECTION
-            filename = filename.rsplit('.', 1)[0] + '.json'
-            # create dict with values for JSON output
-            json_dict: dict = dict()
-            # start by adding the command line arguments
-            json_dict['cmd'] = ' '.join([f'"{arg}"' if ' ' in arg else arg for arg in sys.argv[1:]])
-            # to determine if a variable exists
-            # it should but just a validation check
-            if 'ip_list' in locals():
-                if all_ip and len(all_ip) >= 1 and ip_list and len(ip_list) > 0:
-                    json_dict['ips'] = ip_list
-
-            if len(all_emails) > 0:
-                json_dict['emails'] = all_emails
-
-            if dnsresolve is None or (len(final_dns_resolver_list) > 0 and len(full) > 0):
-                json_dict['hosts'] = full
-            elif len(all_hosts) > 0:
-                json_dict['hosts'] = all_hosts
-            else:
-                json_dict['hosts'] = []
-
-            if vhost and len(vhost) > 0:
-                json_dict['vhosts'] = vhost
-
-            if len(interesting_urls) > 0:
-                json_dict['interesting_urls'] = interesting_urls
-
-            if len(all_urls) > 0:
-                json_dict['trello_urls'] = all_urls
-
-            if len(total_asns) > 0:
-                json_dict['asns'] = total_asns
-
-            if len(twitter_people_list_tracker) > 0:
-                json_dict['twitter_people'] = twitter_people_list_tracker
-
-            if len(linkedin_people_list_tracker) > 0:
-                json_dict['linkedin_people'] = linkedin_people_list_tracker
-
-            if len(linkedin_links_tracker) > 0:
-                json_dict['linkedin_links'] = linkedin_links_tracker
-
-            if len(all_people) > 0:
-                json_dict['people'] = all_people
-
-            if takeover_status and len(takeover_results) > 0:
-                json_dict['takeover_results'] = takeover_results
-
-            json_dict['shodan'] = shodanres
-            async with await anyio.open_file(filename, 'w+') as fp:
-                dumped_json = ujson.dumps(json_dict, sort_keys=True)
-                await fp.write(dumped_json)
-            output_logger.info('[*] JSON File saved.')
-        except (OSError, ValueError, TypeError, UnicodeEncodeError) as er:
-            output_logger.info(f'[!] An error occurred while saving the JSON file: {er} ')
-        output_logger.info('\n\n')
+        shodan_error = shodan_errors[0] if shodan_errors else None
+        selected_executions.append(
+            _completed_execution(
+                'action:shodan',
+                ActivityClass.DIRECT,
+                action_started_at,
+                action_started,
+                len(shodanres),
+                shodan_error,
+                partial=bool(shodan_error and shodanres),
+            )
+        )
 
     # Enhanced code block for API Endpoint scanning feature
-    if args.api_scan or 'api_endpoints' in engines:
+    endpoints_found: dict[str, Any] = {}
+    interesting_endpoints: dict[str, Any] = {}
+    auth_required: dict[str, Any] = {}
+    api_versions: set[str] = set()
+    rate_limits: dict[str, Any] = {}
+    methods: set[str] = set()
+    status_codes: set[int] = set()
+    if api_scan_enabled or 'api_endpoints' in engines:
+        action_started_at = datetime.now(UTC)
+        action_started = time.perf_counter()
+        action_error = None
         try:
             # Define a default wordlist if none is specified
             wordlist = args.wordlist or str(DATA_DIR / 'wordlists' / 'api_endpoints.txt')
@@ -1803,56 +1838,30 @@ async def start(rest_args: argparse.Namespace | None = None):
                 output_logger.info(f'Basic API wordlist created with {len(basic_endpoints)} endpoints.')
 
             output_logger.info(f'\n[*] Starting API endpoint scanning with wordlist: {wordlist}')
-            api_scanner = api_endpoints.SearchApiEndpoints(word=args.domain, wordlist=wordlist)
+            api_scanner = api_endpoints.SearchApiEndpoints(word=word, wordlist=wordlist)
             await api_scanner.do_search()
 
-            # Print results
             endpoints_found = api_scanner.get_found_endpoints()
-            output_logger.info(f'\n[*] API Endpoints found: {len(endpoints_found)}')
-            for endpoint in endpoints_found:
-                output_logger.info(f'    - {endpoint}')
-
             interesting_endpoints = api_scanner.get_interesting_endpoints()
-            output_logger.info(f'\n[*] Interesting endpoints (200, 201, 202): {len(interesting_endpoints)}')
-            for endpoint in interesting_endpoints:
-                output_logger.info(f'    - {endpoint}')
-
             auth_required = api_scanner.get_auth_required()
-            output_logger.info(f'\n[*] Endpoints requiring authentication: {len(auth_required)}')
-            for endpoint in auth_required:
-                output_logger.info(f'    - {endpoint}')
-
             api_versions = api_scanner.get_api_versions()
-            output_logger.info(f'\n[*] Detected API versions: {len(api_versions)}')
-            for version in api_versions:
-                output_logger.info(f'    - {version}')
-
             rate_limits = api_scanner.get_rate_limits()
-            output_logger.info(f'\n[*] Rate limited endpoints: {len(rate_limits)}')
-            for endpoint, info in rate_limits.items():
-                output_logger.info(f'    - {endpoint} ({info.method})')
-
             methods = api_scanner.get_methods()
-            output_logger.info(f'\n[*] HTTP methods used: {", ".join(methods)}')
-
             status_codes = api_scanner.get_status_codes()
-            output_logger.info(f'\n[*] HTTP status codes encountered: {", ".join(map(str, status_codes))}')
+            _remember_results('api-endpoint', endpoints_found, 'api-scan')
+            _remember_results('api-auth-required', auth_required, 'api-scan')
+            _remember_results('api-version', api_versions, 'api-scan')
+            _remember_results('api-rate-limited', rate_limits, 'api-scan')
+            _remember_results('http-method', methods, 'api-scan')
+            _remember_results('http-status', status_codes, 'api-scan')
 
             # Add results to storage
             db = stash.StashManager()
-            await db.store_all(word, endpoints_found, 'api_endpoint', 'api_scan')
-
-            # Use custom database function if available
-            try:
-                # Try to use the storage module if available
-                db_storage = stash.StashManager()
-                await db_storage.store_all(word, endpoints_found, 'api_endpoint', 'api_scan')
-            except AttributeError:
-                output_logger.info('\n[*] No custom database functions found')
+            _defer_legacy_results(endpoints_found, 'api_endpoint', 'api_scan')
 
             # Add to interesting URLs if any endpoints were found
             if interesting_endpoints:
-                new_urls = [f'https://{args.domain}{endpoint}' for endpoint in interesting_endpoints]
+                new_urls = list(interesting_endpoints)
                 interesting_urls.extend(new_urls)
 
                 # Also add complete domain paths to the interesting_urls list
@@ -1860,72 +1869,185 @@ async def start(rest_args: argparse.Namespace | None = None):
 
             output_logger.info('\n[+] API scanning completed successfully.')
 
-        except MissingKey:
+        except MissingKey as error:
+            action_error = error
             output_logger.info('\n[!] API endpoint scanning requires a wordlist. Use -w to specify a wordlist file.')
             output_logger.info('    Creating a basic wordlist and trying again...')
             # The wordlist creation code above could be used here
         except Exception as e:
+            action_error = e
             output_logger.info(f'\n[!] An exception has occurred in API Endpoints scanning: {e}')
             output_logger.info('    Continuing with the rest of the scan...')
-            traceback.print_exc()  # More detailed error information for developers
+            logger.exception('API endpoint scan failed')
+        selected_executions.append(
+            _completed_execution(
+                'action:api-scan',
+                ActivityClass.DIRECT,
+                action_started_at,
+                action_started,
+                len(endpoints_found),
+                action_error,
+            )
+        )
 
-    if 'securityscorecard' in engines:
+    all_hosts = sorted_unique(all_hosts)
+    all_ip = sorted_unique([*all_ip, *ip_list])
+    interesting_urls = sorted_unique(interesting_urls)
+    all_urls = sorted_unique(all_urls)
+    if selected_hostname_observations:
+        run_result = add_run_evidence(run_result, observations=selected_hostname_observations)
+    report_hosts = sorted_unique(
+        entity.value
+        for entity in run_result.entities
+        if ScopeClass.IN_SCOPE in entity.scope_classes and entity.value != run_result.target
+    )
+    result_records = [
+        *(_result_record('subdomain', value) for value in report_hosts),
+        *(
+            _result_record(
+                'scope-extension',
+                entity.value,
+                *(observation.source for observation in entity.observations),
+            )
+            for entity in run_result.entities
+            if ScopeClass.SCOPE_EXTENSION in entity.scope_classes
+        ),
+        *(
+            _result_record(
+                'external-relationship',
+                entity.value,
+                *(observation.source for observation in entity.observations),
+            )
+            for entity in run_result.entities
+            if ScopeClass.EXTERNAL_RELATIONSHIP in entity.scope_classes
+        ),
+        *(_result_record('ip', value) for value in all_ip),
+        *(_result_record('asn', value) for value in total_asns),
+        *(_result_record('email', value) for value in all_emails),
+        *(_result_record('url', value) for value in sorted_unique([*interesting_urls, *all_urls, *linkedin_links_tracker])),
+        *(_result_record('person', value) for value in twitter_people_list_tracker),
+        *(_result_record('person', value) for value in linkedin_people_list_tracker),
+        *(_result_record('person', value) for value in all_people),
+        *(_result_record('vhost', value) for value in vhost),
+        *(_result_record('takeover', f'{host}:{status}', 'takeover') for host, status in sorted(takeover_results.items())),
+        *(_result_record('screenshot', value, 'screenshot') for value in screenshot_tups),
+        *(_result_record('shodan', value, 'shodan') for value in shodanres),
+        *(_result_record('api-endpoint', value, 'api-scan') for value in sorted(endpoints_found)),
+        *(_result_record('api-auth-required', value, 'api-scan') for value in sorted(auth_required)),
+        *(_result_record('api-version', value, 'api-scan') for value in sorted(api_versions)),
+        *(_result_record('api-rate-limited', value, 'api-scan') for value in sorted(rate_limits)),
+        *(_result_record('http-method', value, 'api-scan') for value in sorted(methods)),
+        *(_result_record('http-status', value, 'api-scan') for value in sorted(status_codes)),
+    ]
+    completed_run = complete_run(run_result, results=result_records, executions=selected_executions)
+    await db.store_run(completed_run, legacy_results=pending_legacy_results)
+
+    command = 'REST /query' if rest_args is not None else ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in sys.argv)
+    if not dns_requested:
+        dns_configuration = 'DNS resolution: off'
+    elif len(final_dns_resolver_list) == 3:
+        dns_configuration = f'DNS resolution: consensus via {", ".join(final_dns_resolver_list)}'
+    elif final_dns_resolver_list:
+        dns_configuration = f'DNS resolution: {", ".join(final_dns_resolver_list)}'
+    else:
+        dns_configuration = 'DNS resolution: system resolvers'
+    actions = [
+        name
+        for enabled, name in (
+            (dnsbrute[0], 'dns-brute'),
+            (dnslookup, 'dns-reverse'),
+            (takeover_status, 'takeover'),
+            (bool(screenshot_path), 'screenshot'),
+            (shodan, 'shodan'),
+            (api_scan_enabled or 'api_endpoints' in engines, 'api-scan'),
+        )
+        if enabled
+    ]
+    activity_summary = '; '.join(dict.fromkeys(str(execution.activity) for execution in completed_run.executions))
+    if rest_args is None:
+        output_logger.info(
+            format_run_terminal(
+                completed_run,
+                configuration=(
+                    f'Command: {command}',
+                    f'Sources: {", ".join(engines) if engines else "none"}',
+                    dns_configuration,
+                    f'Actions: {", ".join(actions) if actions else "none"}',
+                    f'Activity: {activity_summary or "none"}',
+                ),
+            )
+        )
+
+    if filename:
+        output_logger.info('\n[*] Reporting started.')
+        legacy_hosts = legacy_report_hosts(all_hosts, full if dns_requested else ())
+        report_base = (
+            os.path.join('theHarvester/app/static', os.path.splitext(rest_filename)[0])
+            if rest_filename
+            else os.path.splitext(filename)[0]
+        )
         try:
-            output_logger.info('\n[*] Performing SecurityScorecard scan...')
-            securityscorecard_scanner = securityscorecard.SearchSecurityScorecard(word)
-            await securityscorecard_scanner.process(use_proxy)
+            async with await anyio.open_file(report_base + '.xml', 'w+') as file:
+                await file.write('<?xml version="1.0" encoding="UTF-8"?><theHarvester>')
+                await file.write('<cmd>' + sanitize_for_xml(command) + '</cmd>')
+                for email in all_emails:
+                    await file.write('<email>' + sanitize_for_xml(email) + '</email>')
+                for value in legacy_hosts:
+                    host, ip = value.split(':', 1) if ':' in value else (value, '')
+                    if ip and len(ip) > 3:
+                        await file.write(
+                            f'<host><ip>{sanitize_for_xml(ip)}</ip><hostname>{sanitize_for_xml(host)}</hostname></host>'
+                        )
+                    else:
+                        await file.write(f'<host>{sanitize_for_xml(host)}</host>')
+                for value in vhost:
+                    host, ip = value.split(':', 1) if ':' in value else (value, '')
+                    if ip and len(ip) > 3:
+                        await file.write(
+                            f'<vhost><ip>{sanitize_for_xml(ip)} </ip><hostname>{sanitize_for_xml(host)}</hostname></vhost>'
+                        )
+                    else:
+                        await file.write(f'<vhost>{sanitize_for_xml(host)}</vhost>')
+                await file.write(run_result_xml(completed_run))
+                await file.write('</theHarvester>')
+            output_logger.info('[*] XML File saved.')
+        except (OSError, ValueError, TypeError, UnicodeEncodeError) as error:
+            output_logger.info(f'[!] An error occurred while saving the XML file: {error}')
 
-            # Use the existing API to get results
-            hosts = await securityscorecard_scanner.get_hostnames()
-            if hosts:
-                output_logger.info(f'\n[*] SecurityScorecard results: {len(hosts)} hosts found')
-                for host in hosts:
-                    output_logger.info(f'    - {host}')
-
-                all_hosts.extend(hosts)
-
-            ips = await securityscorecard_scanner.get_ips()
-            if ips:
-                output_logger.info(f'\n[*] SecurityScorecard IPs found: {len(ips)}')
-                for ip in ips:
-                    output_logger.info(f'    - {ip}')
-                all_ip.extend(ips)
-
-        except Exception as e:
-            output_logger.info(f'An exception has occurred in SecurityScorecard scanning: {e}')
-
-    if 'builtwith' in engines:
         try:
-            output_logger.info('\n[*] Performing BuiltWith scan...')
-            builtwith_scanner = builtwith.SearchBuiltWith(word)
-            await builtwith_scanner.process(use_proxy)
-
-            hosts = await builtwith_scanner.get_hostnames()
-            if hosts:
-                output_logger.info(f'\n[*] BuiltWith results: {len(hosts)} hosts found')
-                for host in hosts:
-                    output_logger.info(f'    - {host}')
-
-                # Add results to the main host list
-                all_hosts.extend(hosts)
-
-            urls = list(await builtwith_scanner.get_interesting_urls())
-            if urls:
-                output_logger.info(f'\n[*] BuiltWith interesting URLs found: {len(urls)}')
-                for url in urls:
-                    output_logger.info(f'    - {url}')
-                interesting_urls.extend(urls)
-
-        except Exception as e:
-            if isinstance(e, MissingKey):
-                if not args.quiet:
-                    output_logger.info(MissingKey('BuiltWith'))
-                else:
-                    output_logger.info(f'An exception has occurred in BuiltWith scanning: {e}')
+            json_dict: dict[str, object] = {
+                'cmd': command,
+                'hosts': legacy_hosts,
+                'shodan': shodanres,
+            }
+            optional_results = {
+                'ips': all_ip,
+                'emails': all_emails,
+                'vhosts': vhost,
+                'interesting_urls': interesting_urls,
+                'trello_urls': all_urls,
+                'asns': total_asns,
+                'twitter_people': twitter_people_list_tracker,
+                'linkedin_people': linkedin_people_list_tracker,
+                'linkedin_links': linkedin_links_tracker,
+                'people': all_people,
+                'takeover_results': takeover_results,
+            }
+            json_dict.update({key: value for key, value in optional_results.items() if value})
+            async with await anyio.open_file(report_base + '.json', 'w+') as file:
+                await file.write(ujson.dumps(legacy_json_result(completed_run, json_dict), sort_keys=True))
+            output_logger.info('[*] JSON File saved.')
+            async with await anyio.open_file(report_base + '.jsonl', 'w+') as file:
+                await file.write(run_result_jsonl(completed_run) + '\n')
+            output_logger.info('[*] JSONL File saved.')
+        except (OSError, ValueError, TypeError, UnicodeEncodeError) as error:
+            output_logger.info(f'[!] An error occurred while saving the JSON files: {error}')
 
     if rest_args is not None:
+        if dnsbrute[1]:
+            return (dns_bruteforce_results, completed_run) if getattr(rest_args, 'include_run', False) else dns_bruteforce_results
         all_hosts = sorted({host.replace('www.', '') for host in all_hosts})
-        return (
+        response = (
             total_asns,
             interesting_urls,
             twitter_people_list_tracker,
@@ -1936,6 +2058,7 @@ async def start(rest_args: argparse.Namespace | None = None):
             all_emails,
             all_hosts,
         )
+        return (*response, completed_run) if getattr(rest_args, 'include_run', False) else response
     sys.exit(0)
 
 
