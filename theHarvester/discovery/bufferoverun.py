@@ -10,31 +10,36 @@ class SearchBufferover:
         self.totalhosts: set = set()
         self.totalips: set = set()
         self.key = Core.bufferoverun_key()
-        if self.key is None:
+        if not self.key:
             raise MissingKey('bufferoverun')
         self.proxy = False
 
     async def do_search(self) -> None:
         url = f'https://tls.bufferover.run/dns?q={self.word}'
-        response = await AsyncFetcher.fetch_all(
-            [url],
+        response = await AsyncFetcher.fetch(
+            url=url,
             json=True,
             headers={'User-Agent': Core.get_user_agent(), 'x-api-key': f'{self.key}'},
             proxy=self.proxy,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
         )
-        dct = response[0]
-        if dct['Results']:
+        if not isinstance(response, dict) or not isinstance(response.get('Results'), list):
+            raise ValueError('BufferOverrun returned an invalid payload')
+        results = response['Results']
+        if results:
             self.totalhosts = {
                 (
                     host.split(',')
                     if ',' in host and self.word.replace('www.', '') in host.split(',')[0] in host
                     else host.split(',')[4]
                 )
-                for host in dct['Results']
+                for host in results
             }
 
         self.totalips = {
-            ip.split(',')[0] for ip in dct['Results'] if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip.split(',')[0])
+            ip.split(',')[0] for ip in results if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip.split(',')[0])
         }
 
     async def get_hostnames(self) -> set:
