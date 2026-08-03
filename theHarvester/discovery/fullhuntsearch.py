@@ -1,11 +1,8 @@
-import logging
 from typing import Any, ClassVar
 from urllib.parse import quote
 
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib.core import AsyncFetcher, Core
-
-logger = logging.getLogger(__name__)
 
 
 class SearchFullHunt:
@@ -143,13 +140,21 @@ class SearchFullHunt:
     async def _fetch_data(self, endpoint: str) -> dict[str, Any]:
         """Generic method to fetch data from a specific endpoint"""
         url = f'{self.BASE_URL}/{endpoint}'
-        response = await AsyncFetcher.fetch_all(
-            [url],
-            json=True,
-            headers=self._get_headers(),
-            proxy=self.proxy,
-        )
-        return response[0]
+        try:
+            response = await AsyncFetcher.fetch(
+                url=url,
+                json=True,
+                headers=self._get_headers(),
+                proxy=self.proxy,
+                fail_on_http_error=True,
+                follow_redirects=False,
+                raise_on_error=True,
+            )
+        except RuntimeError as error:
+            raise RuntimeError(f'FullHunt returned {error}') from error
+        if not isinstance(response, dict):
+            raise ValueError('FullHunt returned an invalid payload')
+        return response
 
     def add_filter(self, filter_name: str, filter_value: str) -> None:
         """Add a search filter to be used in advanced searches
@@ -286,6 +291,12 @@ class SearchFullHunt:
             return
 
         hosts = details['hosts']
+        if any(
+            not isinstance(host_data, dict) or not isinstance(host_data.get('host'), str) or not host_data['host'].strip()
+            for host_data in hosts
+        ):
+            raise ValueError('FullHunt returned an invalid host entry')
+
         for host_data in hosts:
             # Extract subdomains
             if host_data.get('host'):
@@ -365,8 +376,8 @@ class SearchFullHunt:
 
     async def extract_data_from_search_results(self, results: dict[str, Any]) -> None:
         """Extract useful information from search results"""
-        if 'hosts' not in results:
-            return
+        if not isinstance(results.get('hosts'), list):
+            raise ValueError('FullHunt returned an invalid search payload')
 
         # Store the raw results
         self.total_results['search_results'].append(results)
@@ -376,25 +387,25 @@ class SearchFullHunt:
 
     async def do_search(self) -> None:
         """Main search method that calls the various endpoints"""
-        try:
-            # First get domain details which includes most information
-            domain_details = await self.get_domain_details()
-            self.total_results['domain_details'] = domain_details
-            await self.extract_data_from_domain_details(domain_details)
+        # First get domain details which includes most information
+        domain_details = await self.get_domain_details()
+        if not isinstance(domain_details.get('hosts'), list):
+            raise ValueError('FullHunt returned an invalid domain details payload')
+        self.total_results['domain_details'] = domain_details
+        await self.extract_data_from_domain_details(domain_details)
 
-            # If no hosts found in domain details, try the dedicated subdomains endpoint
-            if not self.total_results['hosts']:
-                subdomains_response = await self.get_subdomains()
-                if 'hosts' in subdomains_response:
-                    self.total_results['hosts'] = subdomains_response['hosts']
+        # If no hosts found in domain details, try the dedicated subdomains endpoint
+        if not self.total_results['hosts']:
+            subdomains_response = await self.get_subdomains()
+            hosts = subdomains_response.get('hosts')
+            if not isinstance(hosts, list):
+                raise ValueError('FullHunt returned an invalid subdomains payload')
+            self.total_results['hosts'] = hosts
 
-            # If filters are set, perform an advanced search
-            if self.filters:
-                search_results = await self.advanced_search()
-                await self.extract_data_from_search_results(search_results)
-
-        except Exception as e:
-            logger.info(f'Error during FullHunt search: {e}')
+        # If filters are set, perform an advanced search
+        if self.filters:
+            search_results = await self.advanced_search()
+            await self.extract_data_from_search_results(search_results)
 
     async def get_hostnames(self) -> list[str]:
         """Return list of discovered subdomains"""
