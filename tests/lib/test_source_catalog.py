@@ -27,6 +27,12 @@ def test_source_specs_cover_supported_sources() -> None:
     assert set(SOURCE_SPECS) <= set(Core.get_supportedengines())
 
 
+def test_bitbucket_without_domain_search_is_not_selectable() -> None:
+    assert 'bitbucket' not in SOURCE_SPECS
+    assert 'bitbucket' not in Core.get_supportedengines()
+    assert 'bitbucket' not in _scheduled_source_names()
+
+
 def test_subdomain_route_drives_subdomain_capability() -> None:
     spec = SourceSpec(
         name='example',

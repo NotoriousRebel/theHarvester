@@ -7,6 +7,20 @@ import pytest
 from theHarvester import __main__ as theharvester_main
 
 
+@pytest.mark.asyncio
+async def test_help_does_not_advertise_unsupported_bitbucket(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '--help'])
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert 'bitbucket' not in capsys.readouterr().out.lower()
+
+
 def _start_args(source: str = 'crtsh') -> argparse.Namespace:
     return argparse.Namespace(
         api_scan=False,

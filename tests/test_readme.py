@@ -79,17 +79,19 @@ def test_readme_matches_declared_source_contracts() -> None:
     declared = _declared_source_contracts()
 
     assert '| Source | Subdomains | Emails | IPs | ASNs | URLs / links | People |' in readme
-    assert len(declared) == 56
-    assert len(documented) == 56
+    assert len(declared) == 55
+    assert len(documented) == 55
     assert documented == declared
     assert {'securitytrails', 'shodaninternetdb'}.isdisjoint(documented)
 
 
 def test_readme_api_key_markers_match_configuration() -> None:
     requirements = _documented_api_key_requirements(Path('README.md').read_text())
+    configured = _configured_api_key_sources()
 
     assert set(requirements.values()) <= {'✓', 'Optional', 'No'}
-    assert {source for source, marker in requirements.items() if marker != 'No'} == _configured_api_key_sources()
+    assert 'bitbucket' in configured
+    assert {source for source, marker in requirements.items() if marker != 'No'} == configured - {'bitbucket'}
     assert {source for source, marker in requirements.items() if marker == 'Optional'} == OPTIONAL_API_KEY_SOURCES
 
 
