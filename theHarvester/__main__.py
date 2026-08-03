@@ -21,7 +21,6 @@ from theHarvester.discovery import (
     api_endpoints,
     baidusearch,
     bevigil,
-    bitbucket,
     bravesearch,
     bufferoverun,
     builtwith,
@@ -208,7 +207,7 @@ async def start(rest_args: argparse.Namespace | None = None):
         '-b',
         '--source',
         help="""Comma-separated sources or capability selectors: subdomains, emails, ips, asns, urls, people, or all.
-                            Sources: baidu, bevigil, bitbucket, brave, bufferoverun,
+                            Sources: baidu, bevigil, brave, bufferoverun,
                             builtwith, censys, certspotter, chaos, commoncrawl, criminalip, crtsh, dehashed, dnsdumpster, duckduckgo, dymo, fofa, fullhunt, github-code,
                             gitlab, hackertarget, haveibeenpwned, hudsonrock, hunter, hunterhow, intelx, leakix, leaklookup, mojeek, netlas, onyphe, otx, pentesttools,
                             projectdiscovery, rapiddns, robtex, rocketreach, securityscorecard, securityTrails, sherlockeye, shodan, shodanInternetDB, subdomaincenter,
@@ -447,21 +446,6 @@ async def start(rest_args: argparse.Namespace | None = None):
                         )
                     except Exception as e:
                         show_default_error_message(engineitem, word, error=e)
-
-                elif engineitem == 'bitbucket':
-                    try:
-                        bitbucket_search = partial(bitbucket.SearchBitBucket, word, limit)
-                        stor_lst.append(
-                            store(
-                                bitbucket_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as ex:
-                        if isinstance(ex, MissingKey):
-                            output_logger.info(MissingKey('Bitbucket'))
-                        else:
-                            show_default_error_message(engineitem, word, ex)
 
                 elif engineitem == 'brave':
                     try:

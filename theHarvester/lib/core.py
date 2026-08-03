@@ -289,7 +289,6 @@ class Core:
         return [
             'baidu',
             'bevigil',
-            'bitbucket',
             'bufferoverun',
             'builtwith',
             'brave',
