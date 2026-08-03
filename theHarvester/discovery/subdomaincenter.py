@@ -1,8 +1,4 @@
-import logging
-
 from theHarvester.lib.core import AsyncFetcher, Core
-
-logger = logging.getLogger(__name__)
 
 
 class SubdomainCenter:
@@ -14,13 +10,19 @@ class SubdomainCenter:
 
     async def do_search(self):
         headers = {'User-Agent': Core.get_user_agent()}
-        try:
-            current_url = f'{self.server}{self.word}'
-            resp = await AsyncFetcher.fetch_all([current_url], headers=headers, proxy=self.proxy, json=True)
-            self.results = resp[0]
-            self.results = {sub[4:] if sub[:4] == 'www.' and sub[4:] else sub for sub in self.results}
-        except Exception as e:
-            logger.info(f'An exception has occurred in SubdomainCenter on : {e}')
+        current_url = f'{self.server}{self.word}'
+        response = await AsyncFetcher.fetch(
+            url=current_url,
+            headers=headers,
+            proxy=self.proxy,
+            json=True,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
+        )
+        if not isinstance(response, list):
+            raise ValueError('Subdomain Center returned an invalid payload')
+        self.results = {sub[4:] if sub[:4] == 'www.' and sub[4:] else sub for sub in response}
 
     async def get_hostnames(self):
         return self.results
