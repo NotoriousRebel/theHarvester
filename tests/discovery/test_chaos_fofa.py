@@ -305,3 +305,33 @@ async def test_non_success_response_reports_failure(
 
     assert result.outcome.status is SourceStatus.FAILED
     assert result.outcome.error_type == 'RuntimeError'
+
+
+@pytest.mark.asyncio
+async def test_malformed_later_result_retains_partial_values(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: tuple[str, Any, Callable[[], Any]],
+) -> None:
+    source, module, factory = provider
+    payload = (
+        {'subdomains': ['api', None]}
+        if source == 'chaos'
+        else {
+            'error': False,
+            'results': [
+                ['https://api.example.com', '192.0.2.10'],
+                ['invalid'],
+            ],
+        }
+    )
+
+    async def fake_fetch(**_kwargs: Any) -> dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr(module.AsyncFetcher, 'fetch', fake_fetch)
+    result = await execute_collection('example.com', source, factory)
+
+    assert result.outcome.status is SourceStatus.PARTIAL
+    assert result.route_values[ResultRoute.SUBDOMAINS] == ('api.example.com',)
+    if source == 'fofa':
+        assert result.route_values[ResultRoute.IPS] == ('192.0.2.10',)
