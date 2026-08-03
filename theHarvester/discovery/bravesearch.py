@@ -1,5 +1,4 @@
 import asyncio
-import logging
 from typing import Any
 from urllib.parse import quote
 
@@ -7,8 +6,6 @@ from theHarvester.discovery.constants import MissingKey, get_delay
 from theHarvester.lib.configuration import CredentialAdapter, FileSystemCredentialAdapter
 from theHarvester.lib.core import AsyncFetcher
 from theHarvester.parsers import myparser
-
-logger = logging.getLogger(__name__)
 
 
 class SearchBrave:
@@ -32,9 +29,8 @@ class SearchBrave:
         self.server = 'https://api.search.brave.com/res/v1/web/search'
         self.limit = limit
         self.proxy = False
-        self.rate_limit_delay = 1  # Initial delay for rate limiting
 
-    async def do_search(self):
+    async def do_search(self) -> None:
         headers = {'Accept': 'application/json', 'Accept-Encoding': 'gzip', 'X-Subscription-Token': self.api_key}
 
         # Search queries: exact match and site-specific
@@ -43,97 +39,69 @@ class SearchBrave:
         for query in queries:
             if len(self.results) >= self.limit:
                 break
-            try:
-                for offset in range(10):
-                    remaining = self.limit - len(self.results)
-                    if remaining <= 0:
-                        break
-                    params = {
-                        'q': query,
-                        'count': min(20, remaining),
-                        'offset': offset,
-                        'safesearch': 'off',
-                        'freshness': 'all',
-                        'extra_snippets': 'true',  # Enable extra snippets for richer content
-                        'text_decorations': 'true',  # Enable highlighting
-                        'spellcheck': 'true',  # Enable spellcheck
-                    }
-
-                    # Build URL with parameters
-                    param_string = '&'.join([f'{k}={quote(str(v))}' for k, v in params.items()])
-                    url = f'{self.server}?{param_string}'
-
-                    resp = await AsyncFetcher.fetch(url=url, headers=headers, proxy=self.proxy, json=True)
-
-                    # Handle API response
-                    if resp is None:
-                        logger.info('No response received from Brave Search API')
-                        break
-
-                    # Check for API errors (rate limit, quota exceeded, etc.)
-                    if 'error' in resp:
-                        error_msg = resp.get('error', {}).get('message', 'Unknown API error')
-                        error_code = resp.get('error', {}).get('code', 'unknown')
-
-                        if 'rate limit' in error_msg.lower() or error_code == 'rate_limit_exceeded':
-                            logger.info(f'Rate limit exceeded. Increasing delay to {self.rate_limit_delay * 2} seconds')
-                            self.rate_limit_delay *= 2
-                            await asyncio.sleep(self.rate_limit_delay)
-                            break
-                        elif 'quota' in error_msg.lower() or error_code == 'quota_exceeded':
-                            logger.info('Brave Search API quota exceeded')
-                            break
-                        else:
-                            break
-
-                    if 'web' in resp and 'results' in resp['web']:
-                        results = resp['web']['results'][:remaining]
-                        if not results:
-                            break
-
-                        # Extract text content from results for parsing (including extra snippets)
-                        for result in results:
-                            result_text = f'{result.get("title", "")} {result.get("description", "")}'
-
-                            # Add extra snippets if available
-                            if 'extra_snippets' in result:
-                                for snippet in result['extra_snippets']:
-                                    result_text += f' {snippet}'
-
-                            result_text += f' {result.get("url", "")}'
-                            self.totalresults += result_text + '\n'
-
-                        self.results.extend(results)
-
-                        # Stop if we've reached our limit
-                        if len(self.results) >= self.limit:
-                            break
-                        if not resp.get('query', {}).get('more_results_available', False):
-                            break
-                    else:
-                        logger.info('Unexpected response format from Brave Search API')
-                        break
-
-                    await asyncio.sleep(get_delay())
-
-            except Exception as e:
-                error_msg = str(e).lower()
-
-                # Handle specific API-related exceptions
-                if 'rate limit' in error_msg or '429' in error_msg:
-                    logger.info(f'Rate limit detected in exception. Increasing delay to {self.rate_limit_delay * 2} seconds')
-                    self.rate_limit_delay *= 2
-                    await asyncio.sleep(self.rate_limit_delay)
-                elif 'quota' in error_msg or '403' in error_msg:
-                    logger.info(f'Quota exceeded or access denied: {e}')
+            for offset in range(10):
+                remaining = self.limit - len(self.results)
+                if remaining <= 0:
                     break
-                elif 'timeout' in error_msg:
-                    logger.info(f'Request timeout occurred: {e}')
-                    await asyncio.sleep(get_delay() + 2)
-                else:
-                    logger.info(f'An exception has occurred in bravesearch: {e}')
-                    await asyncio.sleep(get_delay() + 5)
-                continue
+                params = {
+                    'q': query,
+                    'count': min(20, remaining),
+                    'offset': offset,
+                    'safesearch': 'off',
+                    'freshness': 'all',
+                    'extra_snippets': 'true',
+                    'text_decorations': 'true',
+                    'spellcheck': 'true',
+                }
+                param_string = '&'.join([f'{key}={quote(str(value))}' for key, value in params.items()])
+                url = f'{self.server}?{param_string}'
+                resp = await AsyncFetcher.fetch(
+                    url=url,
+                    headers=headers,
+                    proxy=self.proxy,
+                    json=True,
+                    fail_on_http_error=True,
+                    follow_redirects=False,
+                    raise_on_error=True,
+                )
+                if not isinstance(resp, dict):
+                    raise ValueError('Brave Search returned an invalid payload')
+                if 'error' in resp:
+                    error = resp['error']
+                    if not isinstance(error, dict):
+                        raise ValueError('Brave Search returned an invalid error payload')
+                    message = error.get('message', 'Unknown API error')
+                    code = error.get('code', 'unknown')
+                    raise RuntimeError(f'Brave Search returned {code}: {message}')
+
+                web = resp.get('web')
+                if not isinstance(web, dict) or not isinstance(web.get('results'), list):
+                    raise ValueError('Brave Search returned an invalid results payload')
+                results = web['results'][:remaining]
+                query_data = resp.get('query')
+                more_results_available = query_data.get('more_results_available') if isinstance(query_data, dict) else None
+                if not results:
+                    if not isinstance(more_results_available, bool):
+                        raise ValueError('Brave Search returned an invalid pagination payload')
+                    break
+
+                for result in results:
+                    if not isinstance(result, dict):
+                        raise ValueError('Brave Search returned an invalid result')
+                    result_text = f'{result.get("title", "")} {result.get("description", "")}'
+                    for snippet in result.get('extra_snippets', []):
+                        result_text += f' {snippet}'
+                    result_text += f' {result.get("url", "")}'
+                    self.totalresults += result_text + '\n'
+
+                self.results.extend(results)
+                if len(self.results) >= self.limit:
+                    break
+                if not isinstance(more_results_available, bool):
+                    raise ValueError('Brave Search returned an invalid pagination payload')
+                if not more_results_available:
+                    break
+                await asyncio.sleep(get_delay())
 
     async def get_emails(self):
         rawres = myparser.Parser(self.totalresults, self.word)
