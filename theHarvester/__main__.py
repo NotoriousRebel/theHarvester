@@ -8,6 +8,8 @@ import string
 import sys
 import time
 import traceback
+from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -80,7 +82,7 @@ from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker, stash
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
 from theHarvester.lib.output import configure_logging, output_logger, print_linkedin_sections, print_section, sorted_unique
-from theHarvester.lib.run import LegacyHostnameSource, SourceStatus, execute_collection, legacy_subdomains
+from theHarvester.lib.run import SourceStatus, execute_collection, legacy_subdomains
 from theHarvester.lib.source_catalog import ResultRoute, get_source_spec
 from theHarvester.screenshot.screenshot import ScreenShotter
 
@@ -330,42 +332,35 @@ async def start(rest_args: argparse.Namespace | None = None):
     total_asns = []
 
     async def store(
-        search_engine: Any,
+        adapter_factory: Callable[[], Any],
         source: str,
     ) -> None:
         """Process a source and persist its declared consolidated result routes.
 
-        :param search_engine: search engine to fetch details from
+        :param adapter_factory: zero-argument discovery adapter factory
         :param source: source against which the details (corresponding to the search engine) need to be persisted
         """
         routes = get_source_spec(source).routes
-        logger.info(f'Source {source} started')
-        collection_result = None
-        if ResultRoute.SUBDOMAINS in routes:
-            collection_result = await execute_collection(
-                word,
-                LegacyHostnameSource(get_source_spec(source).name, search_engine, use_proxy),
-            )
-            if collection_result.outcome.status is SourceStatus.FAILED:
-                if collection_result.outcome.process_succeeded:
-                    output_logger.info(
-                        f'\n[!] Source {source} subdomain collection failed: {collection_result.outcome.error_type}\n'
-                    )
-                else:
-                    output_logger.info(f'\n[!] Source {source} failed: {collection_result.outcome.error_type}\n')
-                    return
-        else:
-            try:
-                await search_engine.process(use_proxy)
-            except Exception:
-                logger.exception(f'Source {source} failed')
-                raise
+        collection_result = await execute_collection(word, source, adapter_factory, use_proxy)
+        if collection_result.outcome.status is SourceStatus.FAILED:
+            if collection_result.outcome.process_succeeded and ResultRoute.SUBDOMAINS in routes:
+                output_logger.info(f'\n[!] Source {source} subdomain collection failed: {collection_result.outcome.error_type}\n')
+            else:
+                output_logger.info(f'\n[!] Source {source} failed: {collection_result.outcome.error_type}\n')
+            return
+        if collection_result.outcome.status is SourceStatus.SKIPPED:
+            output_logger.info(f'\n[!] Source {source} skipped: {collection_result.outcome.error_type}\n')
+            return
+        if collection_result.outcome.status is SourceStatus.PARTIAL:
+            output_logger.info(f'\n[!] Source {source} partial: {collection_result.outcome.error_type}\n')
         db_stash = stash.StashManager()
 
         if source:
             output_logger.info(f'[*] Searching {source[0].upper() + source[1:]}. ')
 
-        if collection_result is not None and collection_result.outcome.status is not SourceStatus.FAILED:
+        if ResultRoute.SUBDOMAINS in routes and (
+            collection_result.outcome.status is SourceStatus.EMPTY or collection_result.route_values.get(ResultRoute.SUBDOMAINS)
+        ):
             host_names = legacy_subdomains(collection_result)
             if source != 'hackertarget' and source != 'pentesttools' and source != 'rapiddns':
                 # If a source is inside this conditional, it means the hosts returned must be resolved to obtain ip
@@ -390,38 +385,37 @@ async def start(rest_args: argparse.Namespace | None = None):
             await db_stash.store_all(word, all_hosts, 'host', source)
 
         if ResultRoute.EMAILS in routes:
-            email_list = await search_engine.get_emails()
+            email_list = list(collection_result.route_values.get(ResultRoute.EMAILS, ()))
             all_emails.extend(email_list)
             await db_stash.store_all(word, email_list, 'email', source)
 
         if ResultRoute.IPS in routes:
-            ips_list = await search_engine.get_ips()
+            ips_list = list(collection_result.route_values.get(ResultRoute.IPS, ()))
             all_ip.extend(ips_list)
             await db_stash.store_all(word, all_ip, 'ip', source)
 
         if ResultRoute.PEOPLE in routes:
-            people_list = await search_engine.get_people()
+            people_list = list(collection_result.route_values.get(ResultRoute.PEOPLE, ()))
             all_people.extend(people_list)
             await db_stash.store_all(word, people_list, 'people', source)
 
         if ResultRoute.LINKS in routes:
-            links = await search_engine.get_links()
+            links = list(collection_result.route_values.get(ResultRoute.LINKS, ()))
             linkedin_links_tracker.extend(links)
             if len(links) > 0:
                 await db.store_all(word, links, 'linkedinlinks', source)
 
         if ResultRoute.INTERESTING_URLS in routes:
-            iurls = await search_engine.get_interestingurls()
+            iurls = list(collection_result.route_values.get(ResultRoute.INTERESTING_URLS, ()))
             interesting_urls.extend(iurls)
             if len(iurls) > 0:
                 await db.store_all(word, iurls, 'interestingurls', source)
 
         if ResultRoute.ASNS in routes:
-            fasns = await search_engine.get_asns()
+            fasns = list(collection_result.route_values.get(ResultRoute.ASNS, ()))
             total_asns.extend(fasns)
             if len(fasns) > 0:
                 await db.store_all(word, fasns, 'asns', source)
-        logger.info(f'Source {source} completed')
 
     stor_lst = []
     if args.source is not None:
@@ -433,10 +427,9 @@ async def start(rest_args: argparse.Namespace | None = None):
             for engineitem in engines:
                 if engineitem == 'baidu':
                     try:
-                        baidu_search = baidusearch.SearchBaidu(word, limit)
                         stor_lst.append(
                             store(
-                                baidu_search,
+                                partial(baidusearch.SearchBaidu, word, limit),
                                 engineitem,
                             )
                         )
@@ -445,7 +438,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'bevigil':
                     try:
-                        bevigil_search = bevigil.SearchBeVigil(word)
+                        bevigil_search = partial(bevigil.SearchBeVigil, word)
                         stor_lst.append(
                             store(
                                 bevigil_search,
@@ -457,7 +450,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'bitbucket':
                     try:
-                        bitbucket_search = bitbucket.SearchBitBucket(word, limit)
+                        bitbucket_search = partial(bitbucket.SearchBitBucket, word, limit)
                         stor_lst.append(
                             store(
                                 bitbucket_search,
@@ -472,7 +465,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'brave':
                     try:
-                        brave_search = bravesearch.SearchBrave(word, limit)
+                        brave_search = partial(bravesearch.SearchBrave, word, limit)
                         stor_lst.append(
                             store(
                                 brave_search,
@@ -484,7 +477,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'bufferoverun':
                     try:
-                        bufferoverun_search = bufferoverun.SearchBufferover(word)
+                        bufferoverun_search = partial(bufferoverun.SearchBufferover, word)
                         stor_lst.append(
                             store(
                                 bufferoverun_search,
@@ -496,7 +489,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'builtwith':
                     try:
-                        builtwith_search = builtwith.SearchBuiltWith(word)
+                        builtwith_search = partial(builtwith.SearchBuiltWith, word)
                         stor_lst.append(store(builtwith_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -507,7 +500,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'censys':
                     try:
-                        censys_search = censysearch.SearchCensys(word, limit)
+                        censys_search = partial(censysearch.SearchCensys, word, limit)
                         stor_lst.append(
                             store(
                                 censys_search,
@@ -532,7 +525,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'certspotter':
                     try:
-                        certspotter_search = certspottersearch.SearchCertspoter(word)
+                        certspotter_search = partial(certspottersearch.SearchCertspoter, word)
                         stor_lst.append(store(certspotter_search, engineitem))
                     except ConnectionError as ce:
                         if not args.quiet:
@@ -552,7 +545,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'chaos':
                     try:
-                        chaos_search = chaos.SearchChaos(word)
+                        chaos_search = partial(chaos.SearchChaos, word)
                         stor_lst.append(
                             store(
                                 chaos_search,
@@ -568,7 +561,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'commoncrawl':
                     try:
-                        commoncrawl_search = commoncrawl.SearchCommoncrawl(word, limit)
+                        commoncrawl_search = partial(commoncrawl.SearchCommoncrawl, word, limit)
                         stor_lst.append(
                             store(
                                 commoncrawl_search,
@@ -580,7 +573,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'criminalip':
                     try:
-                        criminalip_search = criminalip.SearchCriminalIP(word)
+                        criminalip_search = partial(criminalip.SearchCriminalIP, word)
                         stor_lst.append(
                             store(
                                 criminalip_search,
@@ -596,14 +589,14 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'crtsh':
                     try:
-                        crtsh_search = crtsh.SearchCrtsh(word)
+                        crtsh_search = partial(crtsh.SearchCrtsh, word)
                         stor_lst.append(store(crtsh_search, 'CRTsh'))
                     except Exception as e:
                         output_logger.info(f'[!] A timeout occurred with crtsh, cannot find {args.domain}\n {e}')
 
                 elif engineitem == 'dehashed':
                     try:
-                        dehashed_search = search_dehashed.SearchDehashed(word)
+                        dehashed_search = partial(search_dehashed.SearchDehashed, word)
                         stor_lst.append(
                             store(
                                 dehashed_search,
@@ -619,7 +612,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'dnsdb':
                     try:
-                        dnsdb_search = dnsdb.SearchDNSDB(word)
+                        dnsdb_search = partial(dnsdb.SearchDNSDB, word)
                         stor_lst.append(store(dnsdb_search, engineitem))
                     except MissingKey as e:
                         if not args.quiet:
@@ -629,7 +622,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'dnsdumpster':
                     try:
-                        dnsdumpster_search = search_dnsdumpster.SearchDNSDumpster(word)
+                        dnsdumpster_search = partial(search_dnsdumpster.SearchDNSDumpster, word)
                         stor_lst.append(
                             store(
                                 dnsdumpster_search,
@@ -643,7 +636,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'duckduckgo':
-                    duckduckgo_search = duckduckgosearch.SearchDuckDuckGo(word, limit)
+                    duckduckgo_search = partial(duckduckgosearch.SearchDuckDuckGo, word, limit)
                     stor_lst.append(
                         store(
                             duckduckgo_search,
@@ -653,7 +646,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'dymo':
                     try:
-                        dymo_search = dymosearch.SearchDymo(word)
+                        dymo_search = partial(dymosearch.SearchDymo, word)
                         stor_lst.append(store(dymo_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -664,7 +657,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'fofa':
                     try:
-                        fofa_search = fofa.SearchFofa(word)
+                        fofa_search = partial(fofa.SearchFofa, word)
                         stor_lst.append(
                             store(
                                 fofa_search,
@@ -680,7 +673,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'fullhunt':
                     try:
-                        fullhunt_search = fullhuntsearch.SearchFullHunt(word)
+                        fullhunt_search = partial(fullhuntsearch.SearchFullHunt, word)
                         stor_lst.append(store(fullhunt_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -689,7 +682,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'github-code':
                     try:
-                        github_search = githubcode.SearchGithubCode(word, limit)
+                        github_search = partial(githubcode.SearchGithubCode, word, limit)
                         stor_lst.append(
                             store(
                                 github_search,
@@ -702,7 +695,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'gitlab':
                     try:
-                        gitlab_search = gitlabsearch.SearchGitlab(word)
+                        gitlab_search = partial(gitlabsearch.SearchGitlab, word)
                         stor_lst.append(
                             store(
                                 gitlab_search,
@@ -714,14 +707,14 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'hackertarget':
                     try:
-                        hackertarget_search = hackertarget.SearchHackerTarget(word)
+                        hackertarget_search = partial(hackertarget.SearchHackerTarget, word)
                         stor_lst.append(store(hackertarget_search, engineitem))
                     except Exception as e:
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'haveibeenpwned':
                     try:
-                        haveibeenpwned_search = haveibeenpwned.SearchHaveIBeenPwned(word)
+                        haveibeenpwned_search = partial(haveibeenpwned.SearchHaveIBeenPwned, word)
                         stor_lst.append(
                             store(
                                 haveibeenpwned_search,
@@ -737,7 +730,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'hudsonrock':
                     try:
-                        hudsonrock_search = hudsonrocksearch.SearchHudsonRock(word)
+                        hudsonrock_search = partial(hudsonrocksearch.SearchHudsonRock, word)
                         stor_lst.append(
                             store(
                                 hudsonrock_search,
@@ -749,7 +742,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'hunter':
                     try:
-                        hunter_search = huntersearch.SearchHunter(word, limit, start)
+                        hunter_search = partial(huntersearch.SearchHunter, word, limit, start)
                         stor_lst.append(
                             store(
                                 hunter_search,
@@ -763,7 +756,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'hunterhow':
                     try:
-                        hunterhow_search = searchhunterhow.SearchHunterHow(word)
+                        hunterhow_search = partial(searchhunterhow.SearchHunterHow, word)
                         stor_lst.append(store(hunterhow_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -774,7 +767,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'intelx':
                     try:
-                        intelx_search = intelxsearch.SearchIntelx(word)
+                        intelx_search = partial(intelxsearch.SearchIntelx, word)
                         stor_lst.append(
                             store(
                                 intelx_search,
@@ -790,7 +783,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'leakix':
                     try:
-                        leakix_search = leakix.SearchLeakix(word)
+                        leakix_search = partial(leakix.SearchLeakix, word)
                         stor_lst.append(
                             store(
                                 leakix_search,
@@ -802,7 +795,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'leaklookup':
                     try:
-                        leaklookup_search = leaklookup.SearchLeakLookup(word)
+                        leaklookup_search = partial(leaklookup.SearchLeakLookup, word)
                         stor_lst.append(
                             store(
                                 leaklookup_search,
@@ -817,7 +810,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'mojeek':
                     try:
-                        mojeek_search = mojeek.SearchMojeek(word, limit)
+                        mojeek_search = partial(mojeek.SearchMojeek, word, limit)
                         stor_lst.append(
                             store(
                                 mojeek_search,
@@ -832,7 +825,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'netlas':
                     try:
-                        netlas_search = netlas.SearchNetlas(word, limit)
+                        netlas_search = partial(netlas.SearchNetlas, word, limit)
                         stor_lst.append(
                             store(
                                 netlas_search,
@@ -846,7 +839,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'onyphe':
                     try:
-                        onyphe_search = onyphe.SearchOnyphe(word)
+                        onyphe_search = partial(onyphe.SearchOnyphe, word)
                         stor_lst.append(
                             store(
                                 onyphe_search,
@@ -871,7 +864,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'otx':
                     try:
-                        otxsearch_search = otxsearch.SearchOtx(word)
+                        otxsearch_search = partial(otxsearch.SearchOtx, word)
                         stor_lst.append(
                             store(
                                 otxsearch_search,
@@ -896,7 +889,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'pentesttools':
                     try:
-                        pentesttools_search = pentesttools.SearchPentestTools(word)
+                        pentesttools_search = partial(pentesttools.SearchPentestTools, word)
                         stor_lst.append(store(pentesttools_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -907,7 +900,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'projectdiscovery':
                     try:
-                        projectdiscovery_search = projectdiscovery.SearchDiscovery(word)
+                        projectdiscovery_search = partial(projectdiscovery.SearchDiscovery, word)
                         stor_lst.append(store(projectdiscovery_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -918,7 +911,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'rapiddns':
                     try:
-                        rapiddns_search = rapiddns.SearchRapidDns(word)
+                        rapiddns_search = partial(rapiddns.SearchRapidDns, word)
                         stor_lst.append(store(rapiddns_search, engineitem))
                     except ConnectionError as ce:
                         if not args.quiet:
@@ -938,7 +931,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'robtex':
                     try:
-                        robtex_search = robtex.SearchRobtex(word)
+                        robtex_search = partial(robtex.SearchRobtex, word)
                         stor_lst.append(
                             store(
                                 robtex_search,
@@ -950,7 +943,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'rocketreach':
                     try:
-                        rocketreach_search = rocketreach.SearchRocketReach(word, limit)
+                        rocketreach_search = partial(rocketreach.SearchRocketReach, word, limit)
                         stor_lst.append(store(rocketreach_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -961,7 +954,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'securityscorecard':
                     try:
-                        securityscorecard_search = securityscorecard.SearchSecurityScorecard(word)
+                        securityscorecard_search = partial(securityscorecard.SearchSecurityScorecard, word)
                         stor_lst.append(
                             store(
                                 securityscorecard_search,
@@ -976,7 +969,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'securityTrails':
                     try:
-                        securitytrails_search = securitytrailssearch.SearchSecuritytrail(word)
+                        securitytrails_search = partial(securitytrailssearch.SearchSecuritytrail, word)
                         stor_lst.append(
                             store(
                                 securitytrails_search,
@@ -990,7 +983,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'sherlockeye':
                     try:
-                        sherlockeye_search = sherlockeye.SearchSherlockeye(word)
+                        sherlockeye_search = partial(sherlockeye.SearchSherlockeye, word)
                         stor_lst.append(
                             store(
                                 sherlockeye_search,
@@ -1006,8 +999,6 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'shodan':
                     try:
-                        shodan_search = shodansearch.SearchShodan()
-
                         # For normal module usage, we need to create a wrapper that works with the store function
                         class ShodanWrapper:
                             def __init__(self, domain, shodan_client):
@@ -1039,8 +1030,10 @@ async def start(rest_args: argparse.Namespace | None = None):
                             async def get_hostnames(self):
                                 return list(self.hosts)
 
-                        shodan_wrapper = ShodanWrapper(word, shodan_search)
-                        stor_lst.append(store(shodan_wrapper, engineitem))
+                        def shodan_factory() -> ShodanWrapper:
+                            return ShodanWrapper(word, shodansearch.SearchShodan())
+
+                        stor_lst.append(store(shodan_factory, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
                             if not args.quiet:
@@ -1050,7 +1043,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'shodanInternetDB':
                     try:
-                        shodanidb_search = shodan_internetdb.SearchShodanInternetDB(word)
+                        shodanidb_search = partial(shodan_internetdb.SearchShodanInternetDB, word)
                         stor_lst.append(
                             store(
                                 shodanidb_search,
@@ -1069,7 +1062,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'subdomaincenter':
                     try:
-                        subdomaincenter_search = subdomaincenter.SubdomainCenter(word)
+                        subdomaincenter_search = partial(subdomaincenter.SubdomainCenter, word)
                         stor_lst.append(store(subdomaincenter_search, engineitem))
                     except ConnectionError as ce:
                         if not args.quiet:
@@ -1089,7 +1082,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'subdomainfinderc99':
                     try:
-                        subdomainfinderc99_search = subdomainfinderc99.SearchSubdomainfinderc99(word)
+                        subdomainfinderc99_search = partial(subdomainfinderc99.SearchSubdomainfinderc99, word)
                         stor_lst.append(store(subdomainfinderc99_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -1100,14 +1093,14 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'thc':
                     try:
-                        thc_search = thc.SearchThc(word)
+                        thc_search = partial(thc.SearchThc, word)
                         stor_lst.append(store(thc_search, engineitem))
                     except Exception as e:
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'threatcrowd':
                     try:
-                        threatcrowd_search = threatcrowd.SearchThreatcrowd(word)
+                        threatcrowd_search = partial(threatcrowd.SearchThreatcrowd, word)
                         stor_lst.append(
                             store(
                                 threatcrowd_search,
@@ -1119,7 +1112,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'tomba':
                     try:
-                        tomba_search = tombasearch.SearchTomba(word, limit, start)
+                        tomba_search = partial(tombasearch.SearchTomba, word, limit, start)
                         stor_lst.append(
                             store(
                                 tomba_search,
@@ -1133,7 +1126,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'urlscan':
                     try:
-                        urlscan_search = urlscan.SearchUrlscan(word)
+                        urlscan_search = partial(urlscan.SearchUrlscan, word)
                         stor_lst.append(
                             store(
                                 urlscan_search,
@@ -1158,7 +1151,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'venacus':
                     try:
-                        venacus_search = venacussearch.SearchVenacus(word=word, limit=limit, offset_doc=start)
+                        venacus_search = partial(venacussearch.SearchVenacus, word=word, limit=limit, offset_doc=start)
                         stor_lst.append(
                             store(
                                 venacus_search,
@@ -1174,7 +1167,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'virustotal':
                     try:
-                        virustotal_search = virustotal.SearchVirustotal(word)
+                        virustotal_search = partial(virustotal.SearchVirustotal, word)
                         stor_lst.append(store(virustotal_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -1183,7 +1176,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'waybackarchive':
                     try:
-                        waybackarchive_search = waybackarchive.SearchWaybackarchive(word)
+                        waybackarchive_search = partial(waybackarchive.SearchWaybackarchive, word)
                         stor_lst.append(
                             store(
                                 waybackarchive_search,
@@ -1195,7 +1188,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'whoisxml':
                     try:
-                        whoisxml_search = whoisxml.SearchWhoisXML(word)
+                        whoisxml_search = partial(whoisxml.SearchWhoisXML, word)
                         stor_lst.append(store(whoisxml_search, engineitem))
                     except Exception as e:
                         if isinstance(e, MissingKey):
@@ -1206,7 +1199,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'windvane':
                     try:
-                        windvane_search = windvane.SearchWindvane(word)
+                        windvane_search = partial(windvane.SearchWindvane, word)
                         stor_lst.append(
                             store(
                                 windvane_search,
@@ -1218,7 +1211,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'yahoo':
                     try:
-                        yahoo_search = yahoosearch.SearchYahoo(word, limit)
+                        yahoo_search = partial(yahoosearch.SearchYahoo, word, limit)
                         stor_lst.append(
                             store(
                                 yahoo_search,
@@ -1243,7 +1236,7 @@ async def start(rest_args: argparse.Namespace | None = None):
 
                 elif engineitem == 'zoomeye':
                     try:
-                        zoomeye_search = zoomeyesearch.SearchZoomEye(word, limit)
+                        zoomeye_search = partial(zoomeyesearch.SearchZoomEye, word, limit)
                         stor_lst.append(
                             store(
                                 zoomeye_search,
