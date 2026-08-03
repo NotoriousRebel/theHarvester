@@ -630,12 +630,14 @@ class AsyncFetcher:
         follow_redirects: bool | None = None,
         request_timeout: int | None = None,
         fail_on_http_error: bool = False,
+        raise_on_error: bool = False,
     ) -> Any:
         """Generic HTTP request helper.
         - If a session is not provided, one will be created and closed automatically.
         - Supports optional headers, method selection, proxy, ssl verification, redirects and timeout.
         - Returns response text or json depending on `json` flag.
         - Raises RuntimeError for non-2xx responses when `fail_on_http_error` is enabled.
+        - Re-raises request errors when `raise_on_error` is enabled.
         """
         try:
             ssl_arg = cls._ssl_context(verify)
@@ -679,6 +681,8 @@ class AsyncFetcher:
                 if owns_session:
                     await session.close()
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
+            if raise_on_error:
+                raise
             return ''
 
     @staticmethod
