@@ -26,7 +26,7 @@ class SearchSherlockeye:
     def __init__(self, word: str) -> None:
         self.word = word
         self.key = Core.sherlockeye_key()
-        if self.key is None:
+        if not self.key or not self.key.strip():
             raise MissingKey('sherlockeye')
         self.totalhosts: set[str] = set()
         self.totalemails: set[str] = set()
@@ -77,7 +77,7 @@ class SearchSherlockeye:
     def _extract_result(self, result: dict[str, Any]) -> None:
         attributes = result.get('attributes')
         if not isinstance(attributes, dict):
-            return
+            raise ValueError('Sherlockeye returned invalid result attributes')
 
         domain = attributes.get('domain')
         if isinstance(domain, str):
@@ -96,22 +96,30 @@ class SearchSherlockeye:
             self._extract_from_link(link)
 
     def _extract_response(self, response: dict[str, Any]) -> None:
-        if response.get('success') is False:
+        success = response.get('success')
+        if success is False:
             logger.info('Sherlockeye API error')
-            return
+            raise RuntimeError('Sherlockeye provider rejected the request')
+        if success is not True:
+            raise ValueError('Sherlockeye returned an invalid success status')
 
         data = response.get('data')
         if not isinstance(data, dict):
-            return
+            raise ValueError('Sherlockeye returned an invalid payload')
 
         search_results = data.get('results')
         if not isinstance(search_results, list):
-            return
+            raise ValueError('Sherlockeye returned an invalid payload')
+
+        for result in search_results:
+            if not isinstance(result, dict):
+                raise ValueError('Sherlockeye returned an invalid result')
+            if not isinstance(result.get('attributes'), dict):
+                raise ValueError('Sherlockeye returned invalid result attributes')
 
         self.results = search_results
         for result in search_results:
-            if isinstance(result, dict):
-                self._extract_result(result)
+            self._extract_result(result)
 
     async def do_search(self) -> None:
         payload = {
@@ -121,22 +129,20 @@ class SearchSherlockeye:
         }
         timeout = aiohttp.ClientTimeout(total=self.DEFAULT_TIMEOUT_SECONDS + 30)
 
-        try:
-            async with aiohttp.ClientSession(headers=self._headers(), timeout=timeout) as session:
-                async with session.post(
-                    self.SYNC_SEARCH_URL,
-                    json=payload,
-                    proxy=self._proxy_url(),
-                ) as response:
-                    if response.status != 200:
-                        logger.info(f'Sherlockeye API request failed with status {response.status}')
-                        return
+        async with aiohttp.ClientSession(headers=self._headers(), timeout=timeout) as session:
+            async with session.post(
+                self.SYNC_SEARCH_URL,
+                json=payload,
+                proxy=self._proxy_url(),
+            ) as response:
+                if response.status != 200:
+                    logger.info(f'Sherlockeye API request failed with status {response.status}')
+                    raise RuntimeError(f'Sherlockeye API request failed with status {response.status}')
 
-                    response_data = await response.json()
-                    if isinstance(response_data, dict):
-                        self._extract_response(response_data)
-        except Exception as error:
-            logger.info(f'Sherlockeye API error: {error}')
+                response_data = await response.json()
+                if not isinstance(response_data, dict):
+                    raise ValueError('Sherlockeye returned an invalid payload')
+                self._extract_response(response_data)
 
     async def get_hostnames(self) -> set[str]:
         return self.totalhosts

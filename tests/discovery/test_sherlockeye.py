@@ -17,6 +17,35 @@ if 'aiohttp_socks' not in sys.modules:
 
 from theHarvester.discovery import sherlockeye
 from theHarvester.discovery.constants import MissingKey
+from theHarvester.lib.run import SourceStatus, execute_collection
+
+
+def _install_response(monkeypatch, payload, status=200) -> None:
+    class _FakeResponse:
+        async def json(self):
+            return payload
+
+        async def __aenter__(self):
+            self.status = status
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    class _FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        def post(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    monkeypatch.setattr(sherlockeye.aiohttp, 'ClientSession', _FakeSession)
 
 
 @pytest.mark.asyncio
@@ -25,6 +54,77 @@ async def test_missing_key_raises(monkeypatch) -> None:
 
     with pytest.raises(MissingKey):
         sherlockeye.SearchSherlockeye('example.com')
+
+
+@pytest.mark.asyncio
+async def test_blank_key_skips_before_request(monkeypatch) -> None:
+    monkeypatch.setattr(sherlockeye.Core, 'sherlockeye_key', lambda: '   ')
+    monkeypatch.setattr(
+        sherlockeye.aiohttp,
+        'ClientSession',
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError('provider request attempted')),
+    )
+    result = await execute_collection(
+        'example.com', 'sherlockeye', lambda: sherlockeye.SearchSherlockeye('example.com')
+    )
+
+    assert result.outcome.status is SourceStatus.SKIPPED
+    assert result.outcome.error_type == 'MissingKeyError'
+
+
+@pytest.mark.asyncio
+async def test_valid_empty_response_reports_empty(monkeypatch) -> None:
+    monkeypatch.setattr(sherlockeye.Core, 'sherlockeye_key', lambda: 'dummy-key')
+    _install_response(monkeypatch, {'success': True, 'data': {'results': []}})
+
+    result = await execute_collection(
+        'example.com', 'sherlockeye', lambda: sherlockeye.SearchSherlockeye('example.com')
+    )
+
+    assert result.outcome.status is SourceStatus.EMPTY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'payload',
+    [
+        {'data': {'results': []}},
+        {'success': True, 'data': {'results': {}}},
+        {'success': True, 'data': {'results': [{'attributes': None}]}},
+        {
+            'success': True,
+            'data': {'results': [{'attributes': {'domain': 'api.example.com'}}, None]},
+        },
+    ],
+)
+async def test_malformed_response_reports_failed(monkeypatch, payload) -> None:
+    monkeypatch.setattr(sherlockeye.Core, 'sherlockeye_key', lambda: 'dummy-key')
+    _install_response(monkeypatch, payload)
+
+    result = await execute_collection(
+        'example.com', 'sherlockeye', lambda: sherlockeye.SearchSherlockeye('example.com')
+    )
+
+    assert result.outcome.status is SourceStatus.FAILED
+    assert result.outcome.error_type == 'ValueError'
+    assert all(not values for values in result.route_values.values())
+
+
+@pytest.mark.asyncio
+async def test_transport_error_reports_failed(monkeypatch) -> None:
+    monkeypatch.setattr(sherlockeye.Core, 'sherlockeye_key', lambda: 'dummy-key')
+
+    class _FailingSession:
+        def __init__(self, **_kwargs):
+            raise ConnectionError('provider unavailable')
+
+    monkeypatch.setattr(sherlockeye.aiohttp, 'ClientSession', _FailingSession)
+    result = await execute_collection(
+        'example.com', 'sherlockeye', lambda: sherlockeye.SearchSherlockeye('example.com')
+    )
+
+    assert result.outcome.status is SourceStatus.FAILED
+    assert result.outcome.error_type == 'ConnectionError'
 
 
 @pytest.mark.asyncio
@@ -64,32 +164,7 @@ async def test_process_extracts_domain_intelligence(monkeypatch) -> None:
         'balance': {'credits': 10},
     }
 
-    class _FakeResponse:
-        status = 200
-
-        async def json(self):
-            return api_payload
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-    class _FakeSession:
-        def __init__(self, **_kwargs):
-            pass
-
-        def post(self, *_args, **_kwargs):
-            return _FakeResponse()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-    monkeypatch.setattr(sherlockeye.aiohttp, 'ClientSession', _FakeSession)
+    _install_response(monkeypatch, api_payload)
 
     search = sherlockeye.SearchSherlockeye('example.com')
     await search.process()
@@ -103,40 +178,15 @@ async def test_process_extracts_domain_intelligence(monkeypatch) -> None:
 async def test_process_handles_api_error(monkeypatch, caplog) -> None:
     monkeypatch.setattr(sherlockeye.Core, 'sherlockeye_key', lambda: 'dummy-key')
 
-    class _FakeResponse:
-        status = 401
-
-        async def text(self):
-            return 'provider-secret-payload'
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-    class _FakeSession:
-        def __init__(self, **_kwargs):
-            pass
-
-        def post(self, *_args, **_kwargs):
-            return _FakeResponse()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-    monkeypatch.setattr(sherlockeye.aiohttp, 'ClientSession', _FakeSession)
+    _install_response(monkeypatch, 'provider-secret-payload', status=401)
     caplog.set_level(logging.INFO, logger=sherlockeye.__name__)
 
-    search = sherlockeye.SearchSherlockeye('example.com')
-    await search.process()
+    result = await execute_collection(
+        'example.com', 'sherlockeye', lambda: sherlockeye.SearchSherlockeye('example.com')
+    )
 
-    assert await search.get_hostnames() == set()
-    assert await search.get_emails() == set()
-    assert await search.get_ips() == set()
+    assert result.outcome.status is SourceStatus.FAILED
+    assert result.outcome.error_type == 'RuntimeError'
     assert 'provider-secret-payload' not in caplog.text
     assert '401' in caplog.text
 
@@ -145,35 +195,14 @@ async def test_process_handles_api_error(monkeypatch, caplog) -> None:
 async def test_process_does_not_log_provider_error_message(monkeypatch, caplog) -> None:
     monkeypatch.setattr(sherlockeye.Core, 'sherlockeye_key', lambda: 'dummy-key')
 
-    class _FakeResponse:
-        status = 200
-
-        async def json(self):
-            return {'success': False, 'message': 'provider-secret-payload'}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-    class _FakeSession:
-        def __init__(self, **_kwargs):
-            pass
-
-        def post(self, *_args, **_kwargs):
-            return _FakeResponse()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-    monkeypatch.setattr(sherlockeye.aiohttp, 'ClientSession', _FakeSession)
+    _install_response(monkeypatch, {'success': False, 'message': 'provider-secret-payload'})
     caplog.set_level(logging.INFO, logger=sherlockeye.__name__)
 
-    await sherlockeye.SearchSherlockeye('example.com').process()
+    result = await execute_collection(
+        'example.com', 'sherlockeye', lambda: sherlockeye.SearchSherlockeye('example.com')
+    )
 
+    assert result.outcome.status is SourceStatus.FAILED
+    assert result.outcome.error_type == 'RuntimeError'
     assert 'provider-secret-payload' not in caplog.text
     assert 'API error' in caplog.text
