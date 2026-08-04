@@ -264,14 +264,28 @@ class TestShodanEngine:
             raising=True,
         )
 
-        async def fake_fetch_all(urls, json=False, proxy=False):
-            assert urls == ['https://internetdb.shodan.io/203.0.113.1']
-            return [{'ip': '203.0.113.1', 'hostnames': ['www.example.com']}]
+        async def fake_fetch(**kwargs):
+            assert kwargs['url'] == 'https://internetdb.shodan.io/203.0.113.1'
+            assert kwargs['json'] is True
+            assert kwargs['fail_on_http_error'] is True
+            assert kwargs['raise_on_error'] is True
+            return {
+                'ip': '203.0.113.1',
+                'hostnames': ['www.example.com'],
+                'ports': [443],
+                'vulns': ['CVE-TEST-0001'],
+                'tags': ['example-tag'],
+                'cpes': ['cpe:/a:example:service:1.0'],
+            }
 
-        monkeypatch.setattr(shodan_internetdb.AsyncFetcher, 'fetch_all', fake_fetch_all, raising=True)
+        monkeypatch.setattr(shodan_internetdb.AsyncFetcher, 'fetch', fake_fetch, raising=True)
 
         search = shodan_internetdb.SearchShodanInternetDB('example.com')
         await search.process()
 
         assert await search.get_hostnames() == {'www.example.com'}
         assert await search.get_ips() == {'203.0.113.1'}
+        assert await search.get_ports() == {443}
+        assert await search.get_vulns() == {'CVE-TEST-0001'}
+        assert await search.get_tags() == {'example-tag'}
+        assert await search.get_cpes() == {'cpe:/a:example:service:1.0'}
