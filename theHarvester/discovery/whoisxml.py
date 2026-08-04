@@ -6,7 +6,7 @@ class SearchWhoisXML:
     def __init__(self, word) -> None:
         self.word = word
         self.key = Core.whoisxml_key()
-        if self.key is None:
+        if not self.key or not self.key.strip():
             raise MissingKey('whoisxml')
         self.total_results: list[str] = []
         self.proxy: bool = False
@@ -15,20 +15,22 @@ class SearchWhoisXML:
         # https://subdomains.whoisxmlapi.com/api/documentation/making-requests
         url = 'https://subdomains.whoisxmlapi.com/api/v1'
         params = {'apiKey': self.key, 'domainName': self.word}
-        response = await AsyncFetcher.fetch_all(
-            [url],
+        response = await AsyncFetcher.fetch(
+            url=url,
             json=True,
             params=params,
             headers={'User-Agent': Core.get_user_agent()},
             proxy=self.proxy,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
         )
-        # Parse the response according to the example JSON structure:
-        # {"search":"example.com.com","result":{"count":10000,"records":[{"domain":"test.example.com","firstSeen":1678169400,"lastSeen":1678169400}]}}
-        self.total_results = []
-        if response and response[0]:
-            # Extract domains from the records array
-            if 'result' in response[0] and 'records' in response[0]['result']:
-                self.total_results = [record['domain'] for record in response[0]['result']['records']]
+        if not isinstance(response, dict):
+            raise ValueError('WhoisXML returned an invalid payload')
+        result = response.get('result')
+        if not isinstance(result, dict) or not isinstance(result.get('records'), list):
+            raise ValueError('WhoisXML returned an invalid payload')
+        self.total_results = [record['domain'] for record in result['records']]
 
     async def get_hostnames(self):
         return self.total_results
