@@ -43,16 +43,16 @@ class SearchWaybackarchive:
         return hostname
 
     @staticmethod
-    def _parse_page(payload: object) -> tuple[list[str], str | None] | None:
+    def _parse_page(payload: object) -> tuple[list[str], str | None, bool] | None:
         if not isinstance(payload, str) or payload.lstrip().startswith('<'):
             return None
 
         body, separator, continuation = payload.replace('\r\n', '\n').rpartition('\n\n')
         if not separator:
-            return payload.splitlines(), None
+            return payload.splitlines(), None, False
 
         continuation_lines = [line.strip() for line in continuation.splitlines() if line.strip()]
-        return body.splitlines(), continuation_lines[0] if len(continuation_lines) == 1 else None
+        return body.splitlines(), continuation_lines[0] if len(continuation_lines) == 1 else None, len(continuation_lines) > 1
 
     async def _search_pattern(self, pattern: str, headers: dict[str, str]) -> None:
         resume_key: str | None = None
@@ -69,46 +69,64 @@ class SearchWaybackarchive:
                 query['resumeKey'] = unquote_plus(resume_key)
 
             url = f'{self.hostname}/cdx/search/cdx?{urlencode(query)}'
-            response = await AsyncFetcher.fetch_all([url], headers=headers, proxy=self.proxy)
-            if not response or not isinstance(response, list):
-                logger.info(f'Wayback Archive returned an invalid response container for pattern {pattern}')
-                return
-            if not response[0]:
-                logger.info(f'Wayback Archive returned no page data for pattern {pattern}')
-                return
+            response = await AsyncFetcher.fetch(
+                url=url,
+                headers=headers,
+                proxy=self.proxy,
+                request_timeout=60,
+                fail_on_http_error=True,
+                follow_redirects=False,
+                raise_on_error=True,
+            )
+            if not isinstance(response, str):
+                raise ValueError('Wayback Archive returned an invalid response')
 
-            page = self._parse_page(response[0])
+            page = self._parse_page(response)
             if page is None:
-                logger.info(f'Wayback Archive returned invalid page data for pattern {pattern}; stopping pagination')
-                return
-            lines, next_resume_key = page
+                if response.lstrip().startswith('<'):
+                    raise RuntimeError('Wayback Archive returned a provider error')
+                raise ValueError('Wayback Archive returned invalid page data')
+            lines, next_resume_key, malformed_resume_key = page
+            malformed_row = False
             for line in lines:
                 if not line:
                     continue
                 domain = self._extract_domain_from_url(line.strip())
+                if not domain:
+                    malformed_row = True
+                    continue
                 if domain.endswith(f'.{self.word}') or domain == self.word:
                     self.totalhosts.add(domain)
 
-            if next_resume_key is None or next_resume_key in seen_resume_keys:
+            if malformed_row:
+                raise ValueError('Wayback Archive returned malformed data')
+            if malformed_resume_key:
+                raise ValueError('Wayback Archive returned an invalid resume key')
+            if next_resume_key is not None and not lines:
+                raise ValueError('Wayback Archive returned invalid pagination')
+
+            if next_resume_key is None:
                 return
+            if next_resume_key in seen_resume_keys:
+                raise ValueError('Wayback Archive pagination did not advance')
             seen_resume_keys.add(next_resume_key)
             resume_key = next_resume_key
-        logger.info(f'Wayback Archive page limit reached for pattern {pattern}; results may be incomplete')
+        raise RuntimeError('Wayback Archive page limit reached')
 
     async def do_search(self) -> None:
-        try:
-            headers = {'User-agent': Core.get_user_agent()}
+        headers = {'User-agent': Core.get_user_agent()}
+        execution_error: Exception | None = None
 
-            for pattern in (f'*.{self.word}', f'{self.word}/*'):
-                try:
-                    await self._search_pattern(pattern, headers)
+        for pattern in (f'*.{self.word}', f'{self.word}/*'):
+            try:
+                await self._search_pattern(pattern, headers)
+            except Exception as error:
+                logger.info(f'Wayback Archive API error for pattern {pattern}: {error}')
+                if execution_error is None:
+                    execution_error = error
 
-                except Exception as e:
-                    logger.info(f'Wayback Archive API error for pattern {pattern}: {e}')
-                    continue
-
-        except Exception as e:
-            logger.info(f'Wayback Archive API error: {e}')
+        if execution_error is not None:
+            raise execution_error
 
     async def get_hostnames(self) -> set:
         return self.totalhosts
