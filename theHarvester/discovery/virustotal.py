@@ -1,4 +1,5 @@
 import asyncio
+from urllib.parse import urlencode
 
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib.core import AsyncFetcher, Core
@@ -7,7 +8,7 @@ from theHarvester.lib.core import AsyncFetcher, Core
 class SearchVirustotal:
     def __init__(self, word) -> None:
         self.key = Core.virustotal_key()
-        if self.key is None:
+        if not isinstance(self.key, str) or not self.key.strip():
             raise MissingKey('virustotal')
         self.word = word
         self.proxy = False
@@ -23,42 +24,68 @@ class SearchVirustotal:
             'x-apikey': self.key,
         }
         base_url = f'https://www.virustotal.com/api/v3/domains/{self.word}/subdomains?limit=40'
-        cursor = ''
-        count = 0
-        fail_counter = 0
-        counter = 0
-        breakcon = False
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
         while True:
-            if breakcon:
-                break
             # rate limit is 4 per minute
             # TODO add timer logic if proven to be needed
             # in the meantime sleeping 16 seconds should eliminate hitting the rate limit
-            # in case rate limit is hit, fail counter exists and sleep for 65 seconds
-            send_url = base_url + '&cursor=' + cursor if cursor != '' and len(cursor) > 2 else base_url
-            responses = await AsyncFetcher.fetch_all([send_url], headers=headers, proxy=self.proxy, json=True)
-            jdata = responses[0]
-            if 'data' not in jdata:
-                await asyncio.sleep(60 + 5)
-                fail_counter += 1
-            if 'meta' in jdata:
-                cursor = jdata['meta']['cursor'] if 'cursor' in jdata['meta'] else ''
-                if len(cursor) == 0 and 'data' in jdata:
-                    # if cursor no longer is within the meta field have hit last entry
-                    breakcon = True
-            count += jdata['meta']['count']
-            if count == 0 or fail_counter >= 2:
+            send_url = f'{base_url}&{urlencode({"cursor": cursor})}' if cursor is not None else base_url
+            jdata = await AsyncFetcher.fetch(
+                url=send_url,
+                headers=headers,
+                proxy=self.proxy,
+                json=True,
+                request_timeout=60,
+                fail_on_http_error=True,
+                follow_redirects=False,
+                raise_on_error=True,
+            )
+            if not isinstance(jdata, dict):
+                raise ValueError('VirusTotal returned an invalid response')
+            if jdata.get('error'):
+                raise RuntimeError('VirusTotal returned a provider error')
+            data = jdata.get('data')
+            meta = jdata.get('meta')
+            links = jdata.get('links')
+            if not isinstance(data, list):
+                raise ValueError('VirusTotal returned invalid data')
+            if not isinstance(meta, dict) or not isinstance(links, dict):
+                raise ValueError('VirusTotal returned invalid pagination')
+            page_count = meta.get('count')
+            if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 0:
+                raise ValueError('VirusTotal returned an invalid count')
+            malformed = False
+            for record in data:
+                try:
+                    self.hostnames.extend(await self.parse_hostnames([record], self.word))
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    malformed = True
+            self.hostnames = list(sorted(set(self.hostnames)))
+            # verify domains such as x.x.com.multicdn.x.com are parsed properly
+            self.hostnames = [
+                host
+                for host in self.hostnames
+                if ((len(host.split('.')) >= 3) and host.split('.')[-2] == self.word.split('.')[-2])
+            ]
+            if malformed:
+                raise ValueError('VirusTotal returned malformed data')
+
+            next_link = links.get('next')
+            if next_link is None:
                 break
-            if 'data' in jdata:
-                data = jdata['data']
-                self.hostnames.extend(await self.parse_hostnames(data, self.word))
-                counter += 1
+            if not isinstance(next_link, str) or not next_link.strip():
+                raise ValueError('VirusTotal returned invalid pagination')
+            if not data:
+                raise ValueError('VirusTotal returned invalid pagination')
+            next_cursor = meta.get('cursor')
+            if not isinstance(next_cursor, str) or not next_cursor.strip():
+                raise ValueError('VirusTotal returned invalid pagination')
+            if next_cursor in seen_cursors:
+                raise ValueError('VirusTotal pagination did not advance')
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
             await asyncio.sleep(16)
-        self.hostnames = list(sorted(set(self.hostnames)))
-        # verify domains such as x.x.com.multicdn.x.com are parsed properly
-        self.hostnames = [
-            host for host in self.hostnames if ((len(host.split('.')) >= 3) and host.split('.')[-2] == self.word.split('.')[-2])
-        ]
 
     async def get_hostnames(self) -> list:
         return self.hostnames
@@ -67,7 +94,10 @@ class SearchVirustotal:
     async def parse_hostnames(data, word):
         total_subdomains: set[str] = set()
         for attribute in data:
-            total_subdomains.add(attribute['id'].replace('"', '').replace('www.', ''))
+            identifier = attribute.get('id') if isinstance(attribute, dict) else None
+            if not isinstance(identifier, str) or not identifier.strip():
+                raise ValueError('VirusTotal returned malformed data')
+            total_subdomains.add(identifier.replace('"', '').replace('www.', ''))
             attributes = attribute['attributes']
             total_subdomains.update(
                 {
