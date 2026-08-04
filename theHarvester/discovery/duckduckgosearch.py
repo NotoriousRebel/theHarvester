@@ -1,3 +1,5 @@
+import json
+
 from theHarvester.lib.core import AsyncFetcher, Core
 from theHarvester.parsers import myparser
 
@@ -19,8 +21,24 @@ class SearchDuckDuckGo:
         # Query only the provider; URLs in the response are evidence, not crawl targets.
         url = self.api.replace('x', self.word)
         headers = {'User-Agent': Core.get_user_agent()}
-        first_resp = await AsyncFetcher.fetch_all([url], headers=headers, proxy=self.proxy)
-        self.results = first_resp[0]
+        response = await AsyncFetcher.fetch(
+            url=url,
+            headers=headers,
+            proxy=self.proxy,
+            request_timeout=60,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
+        )
+        if not isinstance(response, str):
+            raise ValueError('DuckDuckGo returned an invalid response')
+        try:
+            payload = json.loads(response)
+        except json.JSONDecodeError as error:
+            raise ValueError('DuckDuckGo returned malformed JSON') from error
+        if not isinstance(payload, dict):
+            raise ValueError('DuckDuckGo returned invalid data')
+        self.results = response
         self.totalresults += self.results
 
     async def get_emails(self):
