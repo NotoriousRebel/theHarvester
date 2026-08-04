@@ -6,7 +6,7 @@ class SearchSecurityScorecard:
     def __init__(self, word: str):
         self.word = word
         self.api_key = Core.securityscorecard_key()
-        if self.api_key is None:
+        if not self.api_key or not self.api_key.strip():
             raise MissingKey('SecurityScorecard')
         self.base_url = 'https://api.securityscorecard.io'
         self.headers = {'Authorization': f'Token {self.api_key}', 'Content-Type': 'application/json'}
@@ -29,6 +29,7 @@ class SearchSecurityScorecard:
                 json=True,
                 fail_on_http_error=True,
                 follow_redirects=False,
+                raise_on_error=True,
             )
         except RuntimeError as error:
             raise RuntimeError(f'SecurityScorecard returned {error}') from error
