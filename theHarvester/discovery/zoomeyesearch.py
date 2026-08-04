@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import math
 import re
 from collections.abc import Iterable
@@ -8,8 +7,6 @@ from typing import Any
 from theHarvester.discovery.constants import MissingKey, get_delay
 from theHarvester.lib.core import AsyncFetcher, Core
 from theHarvester.parsers import myparser
-
-logger = logging.getLogger(__name__)
 
 
 class SearchZoomEye:
@@ -21,8 +18,9 @@ class SearchZoomEye:
         # Which resets your balance to 10000 requests
         # If you wish to extract as many subdomains as possible visit the fetch_subdomains
         # To see how
-        if self.key is None:
+        if not isinstance(self.key, str) or not self.key.strip():
             raise MissingKey('zoomeye')
+        self.key = self.key.strip()
         # API v2 base
         self.baseurl = 'https://api.zoomeye.ai/host/search'
         self.domain_url = 'https://api.zoomeye.ai/domain/search'
@@ -68,21 +66,61 @@ class SearchZoomEye:
         # API v2 uses API-KEY header
         return {'API-KEY': self.key, 'User-Agent': Core.get_user_agent()}
 
+    async def _fetch_page(self, url: str, params: tuple[tuple[str, str], ...]) -> dict[str, Any]:
+        response = await AsyncFetcher.fetch(
+            url=url,
+            json=True,
+            proxy=self.proxy,
+            headers=self._build_headers(),
+            params=params,
+            request_timeout=60,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
+        )
+        if not isinstance(response, dict):
+            raise ValueError('ZoomEye returned an invalid response')
+        if not self._is_success(response):
+            raise RuntimeError('ZoomEye returned a provider error')
+        payload = self._unwrap_data(response)
+        if not isinstance(payload, dict):
+            raise ValueError('ZoomEye returned invalid data')
+        return payload
+
+    @staticmethod
+    def _page_items(payload: dict[str, Any], *keys: str) -> list[Any]:
+        for key in keys:
+            if key in payload:
+                items = payload[key]
+                if not isinstance(items, list):
+                    raise ValueError('ZoomEye returned an invalid page container')
+                return items
+        raise ValueError('ZoomEye returned a missing page container')
+
+    @staticmethod
+    def _domain_names(items: list[Any]) -> tuple[list[str], bool]:
+        names = []
+        malformed = False
+        for item in items:
+            value = item.get('name') or item.get('domain') or item.get('host') if isinstance(item, dict) else None
+            if not isinstance(value, str) or not value.strip():
+                malformed = True
+                continue
+            names.append(value)
+        return names, malformed
+
     @staticmethod
     def _is_success(resp: dict[str, Any]) -> bool:
-        # Accept multiple success indicators across versions
-        try:
-            if 'code' in resp:
-                # v2 style often uses code==0 for success
-                return resp.get('code') in (0, 200)
-            if 'status' in resp and isinstance(resp.get('status'), int):
-                # some responses put HTTP-like code here
-                return resp.get('status') in (0, 200)
-        except Exception as e:
-            logger.info(f'ZoomEye response status parsing failed with {type(e).__name__}')
-            return False
-
-        # If no explicit status, assume success and let parsing validate
+        if 'code' in resp:
+            code = resp['code']
+            if type(code) is not int:
+                raise ValueError('ZoomEye returned an invalid success code')
+            return code in (0, 200, 60000)
+        if 'status' in resp:
+            status = resp['status']
+            if type(status) is not int:
+                raise ValueError('ZoomEye returned an invalid success status')
+            return status in (0, 200)
         return True
 
     @staticmethod
@@ -93,87 +131,66 @@ class SearchZoomEye:
 
     @staticmethod
     def _page_total_from_payload(payload: dict[str, Any], page_size: int) -> int:
-        # Prefer explicit page total if provided
         if 'available' in payload:
             try:
-                return int(payload['available'])
-            except ValueError:
-                logger.info('Payload availablity is not a integer')
-            except Exception as e:
-                logger.info(f'An error occurred in page_total_from_payload : {e}')
-        total_results = payload.get('total') or payload.get('count') or payload.get('total_count')
-        if isinstance(total_results, int) and total_results >= 0:
-            size = payload.get('size') or page_size
+                available = int(payload['available'])
+            except (TypeError, ValueError) as error:
+                raise ValueError('ZoomEye returned invalid pagination') from error
+            if isinstance(payload['available'], bool) or available < 0:
+                raise ValueError('ZoomEye returned invalid pagination')
+            return max(1, available)
+
+        total_key = next((key for key in ('total', 'count', 'total_count') if key in payload), None)
+        if total_key is not None:
+            total_results = payload[total_key]
+            if not isinstance(total_results, int) or isinstance(total_results, bool) or total_results < 0:
+                raise ValueError('ZoomEye returned invalid pagination')
+            size = payload.get('size', page_size)
             try:
                 size_int = int(size)
-                size_int = size_int if size_int > 0 else page_size
-            except Exception:
-                size_int = page_size
+            except (TypeError, ValueError) as error:
+                raise ValueError('ZoomEye returned invalid pagination') from error
+            if isinstance(size, bool) or size_int <= 0:
+                raise ValueError('ZoomEye returned invalid pagination')
             return max(1, math.ceil(total_results / size_int))
-        # Fallback: if a list/matches is present, consider at least one page
-        if any(k in payload for k in ('matches', 'list', 'results', 'items')):
-            return 1
         return 1
 
     @staticmethod
-    def _safe_add_hostname(container: set, value: str | None) -> None:
+    def _safe_add_hostname(container: set, value: str | None) -> bool:
         if not value or not isinstance(value, str):
-            return
+            return False
         v = value.strip()
         if not v:
-            return
+            return False
         v = v.removesuffix('.')
         container.add(v)
+        return True
 
     async def fetch_subdomains(self) -> None:
-        headers = self._build_headers()
         # type=0 for subdomain search per docs
         size = 30
         params = (('q', self.word), ('type', '0'), ('page', '1'), ('size', str(size)))
-        response = await AsyncFetcher.fetch_all(
-            [self.domain_url],
-            json=True,
-            proxy=self.proxy,
-            headers=headers,
-            params=params,
-        )
-        if not response:
-            return
-        raw = response[0] or {}
-        if not self._is_success(raw):
-            return
-        payload = self._unwrap_data(raw)
+        payload = await self._fetch_page(self.domain_url, params)
         total_pages = self._page_total_from_payload(payload, size)
         # If user requested more pages than available, clamp to available
-        self.limit = min(self.limit, total_pages) if total_pages >= 1 else self.limit
+        page_limit = min(self.limit, total_pages) if total_pages >= 1 else self.limit
 
         # Parse first page
-        first_list = payload.get('list') or payload.get('results') or []
-        self.totalhosts.extend(
-            [item.get('name') or item.get('domain') or item.get('host') for item in first_list if isinstance(item, dict)]
-        )
+        first_list = self._page_items(payload, 'list', 'results')
+        found_subdomains, malformed = self._domain_names(first_list)
+        self.totalhosts.extend(found_subdomains)
+        if malformed:
+            raise ValueError('ZoomEye returned malformed domain data')
 
         # Iterate remaining pages
-        for i in range(2, self.limit + 1):
+        for i in range(2, page_limit + 1):
             params = (('q', self.word), ('type', '0'), ('page', str(i)), ('size', str(size)))
-            response = await AsyncFetcher.fetch_all(
-                [self.domain_url],
-                json=True,
-                proxy=self.proxy,
-                headers=headers,
-                params=params,
-            )
-            if not response:
-                break
-            raw = response[0] or {}
-            if not self._is_success(raw):
-                break
-            payload = self._unwrap_data(raw)
-            page_list = payload.get('list') or payload.get('results') or []
-            found_subdomains = [
-                item.get('name') or item.get('domain') or item.get('host') for item in page_list if isinstance(item, dict)
-            ]
-            found_subdomains = [x for x in found_subdomains if x]
+            payload = await self._fetch_page(self.domain_url, params)
+            page_list = self._page_items(payload, 'list', 'results')
+            found_subdomains, malformed = self._domain_names(page_list)
+            if malformed:
+                self.totalhosts.extend(found_subdomains)
+                raise ValueError('ZoomEye returned malformed domain data')
             if not found_subdomains:
                 break
             self.totalhosts.extend(found_subdomains)
@@ -181,62 +198,29 @@ class SearchZoomEye:
                 await asyncio.sleep(get_delay() + 1)
 
     async def do_search(self) -> None:
-        headers = self._build_headers()
         # Fetch subdomains first
         await self.fetch_subdomains()
 
         size = 20
         params = (('query', f'site:{self.word}'), ('page', '1'), ('size', str(size)))
-        response = await AsyncFetcher.fetch_all([self.baseurl], json=True, proxy=self.proxy, headers=headers, params=params)
-        if not response:
-            return
-        raw = response[0] or {}
-        payload = self._unwrap_data(raw)
+        payload = await self._fetch_page(self.baseurl, params)
         total_pages = self._page_total_from_payload(payload, size)
-        self.limit = min(self.limit, total_pages) if total_pages >= 1 else self.limit
-        cur_page = 2 if self.limit >= 2 else -1
+        page_limit = min(self.limit, total_pages) if total_pages >= 1 else self.limit
 
         nomatches_counter = 0
 
         def extract_matches(p: dict[str, Any]) -> Iterable[dict]:
-            return p.get('matches') or p.get('list') or p.get('results') or []
+            return self._page_items(p, 'matches', 'list', 'results')
 
-        if cur_page == -1:
-            if isinstance(payload, dict):
-                matches = extract_matches(payload)
-                if matches:
-                    hostnames, emails, ips, asns, iurls = await self.parse_matches(matches)
-                    self.totalhosts.extend(hostnames)
-                    self.totalemails.extend(emails)
-                    self.totalips.extend(ips)
-                    self.totalasns.extend(asns)
-                    self.interestingurls.extend(iurls)
+        matches = extract_matches(payload)
+        if matches:
+            await self._retain_matches(matches)
+        if page_limit < 2:
             return
 
-        # Parse first page then loop
-        if isinstance(payload, dict):
-            matches = extract_matches(payload)
-            if matches:
-                hostnames, emails, ips, asns, iurls = await self.parse_matches(matches)
-                self.totalhosts.extend(hostnames)
-                self.totalemails.extend(emails)
-                self.totalips.extend(ips)
-                self.totalasns.extend(asns)
-                self.interestingurls.extend(iurls)
-
-        for num in range(2, self.limit + 1):
+        for num in range(2, page_limit + 1):
             params = (('query', f'site:{self.word}'), ('page', str(num)), ('size', str(size)))
-            response = await AsyncFetcher.fetch_all(
-                [self.baseurl],
-                json=True,
-                proxy=self.proxy,
-                headers=headers,
-                params=params,
-            )
-            if not response:
-                break
-            raw = response[0] or {}
-            payload = self._unwrap_data(raw)
+            payload = await self._fetch_page(self.baseurl, params)
             matches = extract_matches(payload)
             if not matches:
                 nomatches_counter += 1
@@ -244,21 +228,20 @@ class SearchZoomEye:
                     break
                 continue
 
-            hostnames, emails, ips, asns, iurls = await self.parse_matches(matches)
-
-            if len(hostnames) == 0 and len(emails) == 0 and len(ips) == 0 and len(asns) == 0 and len(iurls) == 0:
-                nomatches_counter += 1
-                if nomatches_counter >= 5:
-                    break
-
-            self.totalhosts.extend(hostnames)
-            self.totalemails.extend(emails)
-            self.totalips.extend(ips)
-            self.totalasns.extend(asns)
-            self.interestingurls.extend(iurls)
+            await self._retain_matches(matches)
 
             if num % 10 == 0:
                 await asyncio.sleep(get_delay() + 1)
+
+    async def _retain_matches(self, matches: Iterable[dict]) -> None:
+        hostnames, emails, ips, asns, iurls, malformed = await self.parse_matches(matches)
+        self.totalhosts.extend(hostnames)
+        self.totalemails.extend(emails)
+        self.totalips.extend(ips)
+        self.totalasns.extend(asns)
+        self.interestingurls.extend(iurls)
+        if malformed:
+            raise ValueError('ZoomEye returned malformed host data')
 
     async def parse_matches(self, matches):
         # Helper function to parse items from match json
@@ -267,95 +250,141 @@ class SearchZoomEye:
         hostnames: set[str] = set()
         asns: set[str] = set()
         emails: set[str] = set()
+        malformed = False
 
         for match in matches:
             if not isinstance(match, dict):
+                malformed = True
                 continue
+            record_usable = False
             try:
                 # IPs
-                ip = match.get('ip') or match.get('ip_str') or match.get('ip_str_v4') or match.get('address')
-                if isinstance(ip, str):
+                for field in ('ip', 'ip_str', 'ip_str_v4', 'address'):
+                    ip = match.get(field)
+                    if ip is None:
+                        continue
+                    if not isinstance(ip, str) or not ip.strip():
+                        malformed = True
+                        continue
                     ips.add(ip)
+                    record_usable = True
+                    break
 
                 # ASNs
                 asn_val = None
-                if isinstance(match.get('geoinfo'), dict):
-                    asn_val = match['geoinfo'].get('asn')
-                asn_val = asn_val or match.get('asn')
-                if asn_val:
+                geoinfo = match.get('geoinfo')
+                if isinstance(geoinfo, dict):
+                    asn_val = geoinfo.get('asn')
+                elif geoinfo is not None:
+                    malformed = True
+                asn_val = asn_val if asn_val is not None else match.get('asn')
+                if asn_val is not None:
                     try:
-                        asns.add(f'AS{int(asn_val)}')
-                    except Exception:
-                        # if already a string like 'AS12345'
-                        asns.add(str(asn_val) if str(asn_val).startswith('AS') else f'AS{asn_val!s}')
+                        if isinstance(asn_val, bool) or not isinstance(asn_val, int | str) or not str(asn_val).strip():
+                            raise ValueError
+                        asns.add(str(asn_val) if str(asn_val).startswith('AS') else f'AS{int(asn_val)}')
+                        record_usable = True
+                    except (TypeError, ValueError):
+                        malformed = True
 
                 # Reverse DNS and hostnames
                 rdns_new = match.get('rdns_new')
-                if isinstance(rdns_new, str) and rdns_new:
-                    if ',' in rdns_new:
+                if rdns_new is not None:
+                    if not isinstance(rdns_new, str) or not rdns_new.strip():
+                        malformed = True
+                    elif ',' in rdns_new:
                         parts = str(rdns_new).split(',')
                         primary = parts[0]
                         secondary = parts[1] if len(parts) == 2 else None
                         if primary:
-                            self._safe_add_hostname(hostnames, primary)
+                            record_usable = self._safe_add_hostname(hostnames, primary) or record_usable
                         if secondary:
-                            self._safe_add_hostname(hostnames, secondary)
+                            record_usable = self._safe_add_hostname(hostnames, secondary) or record_usable
                     else:
-                        self._safe_add_hostname(hostnames, rdns_new)
+                        record_usable = self._safe_add_hostname(hostnames, rdns_new) or record_usable
 
                 rdns = match.get('rdns')
-                if isinstance(rdns, str) and rdns:
-                    self._safe_add_hostname(hostnames, rdns)
+                if rdns is not None:
+                    if not isinstance(rdns, str) or not rdns.strip():
+                        malformed = True
+                    else:
+                        record_usable = self._safe_add_hostname(hostnames, rdns) or record_usable
 
                 # Additional hostname-like fields
                 for f in ('hostname', 'host', 'domain', 'site', 'fqdn'):
-                    self._safe_add_hostname(hostnames, match.get(f))
+                    if f not in match or match[f] is None:
+                        continue
+                    if self._safe_add_hostname(hostnames, match[f]):
+                        record_usable = True
+                    else:
+                        malformed = True
                 for f in ('hostnames', 'domains', 'names'):
                     vals = match.get(f)
-                    if isinstance(vals, list):
-                        for v in vals:
-                            if isinstance(v, str):
-                                self._safe_add_hostname(hostnames, v)
+                    if vals is None:
+                        continue
+                    if not isinstance(vals, list):
+                        malformed = True
+                        continue
+                    for value in vals:
+                        if self._safe_add_hostname(hostnames, value):
+                            record_usable = True
+                        else:
+                            malformed = True
 
                 # Banner/content extraction for emails, hostnames, iurls
                 banners = []
 
                 portinfo = match.get('portinfo')
                 if isinstance(portinfo, dict):
-                    b = portinfo.get('banner')
-                    if isinstance(b, str) and b:
-                        banners.append(b)
+                    banner = portinfo.get('banner')
+                    if isinstance(banner, str) and banner:
+                        banners.append(banner)
+                    elif banner is not None:
+                        malformed = True
+                elif portinfo is not None:
+                    malformed = True
 
                 service = match.get('service')
                 if isinstance(service, dict):
                     for key in ('banner', 'data', 'raw'):
-                        v = service.get(key)
-                        if isinstance(v, str) and v:
-                            banners.append(v)
+                        value = service.get(key)
+                        if isinstance(value, str) and value:
+                            banners.append(value)
+                        elif value is not None:
+                            malformed = True
                     http = service.get('http')
                     if isinstance(http, dict):
                         for key in ('title', 'html', 'body', 'server', 'raw'):
-                            v = http.get(key)
-                            if isinstance(v, str) and v:
-                                banners.append(v)
+                            value = http.get(key)
+                            if isinstance(value, str) and value:
+                                banners.append(value)
+                            elif value is not None:
+                                malformed = True
+                    elif http is not None:
+                        malformed = True
+                elif service is not None:
+                    malformed = True
 
                 content_blob = '\n'.join(banners)
                 if content_blob:
                     temp_emails = set(await self.parse_emails(content_blob))
                     emails.update(temp_emails)
-                    hostnames.update(set(await self.parse_hostnames(content_blob)))
+                    parsed_hostnames = set(await self.parse_hostnames(content_blob))
+                    hostnames.update(parsed_hostnames)
                     found_urls = {
                         str(iurl.group(1)).replace('"', '')
                         for iurl in re.finditer(self.iurl_regex, content_blob)
                         if self.word in str(iurl.group(1))
                     }
                     iurls.update(found_urls)
+                    record_usable = bool(temp_emails or parsed_hostnames or found_urls) or record_usable
 
-            except Exception as e:
-                # Continue processing other matches instead of failing completely
-                logger.info(f'ZoomEye parsing error: {e}')
+            except Exception:
+                malformed = True
+            if not record_usable:
+                malformed = True
 
-        return hostnames, emails, ips, asns, iurls
+        return hostnames, emails, ips, asns, iurls, malformed
 
     async def process(self, proxy: bool = False) -> None:
         self.proxy = proxy
