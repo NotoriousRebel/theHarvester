@@ -21,14 +21,39 @@ class SearchSubdomainfinderc99:
     async def do_search(self) -> None:
         # Based on https://gist.github.com/th3gundy/bc83580cbe04031e9164362b33600962
         headers = {'User-Agent': Core.get_user_agent()}
-        resp = await AsyncFetcher.fetch_all([self.server], headers=headers, proxy=self.proxy)
-        data = await self.get_csrf_params(resp[0])
+        response = await AsyncFetcher.fetch(
+            url=self.server,
+            headers=headers,
+            proxy=self.proxy,
+            request_timeout=60,
+            fail_on_http_error=True,
+            raise_on_error=True,
+        )
+        if not isinstance(response, str) or not response.strip():
+            raise ValueError('SubdomainFinderC99 returned an invalid CSRF page')
+        data = await self.get_csrf_params(response)
+        if not any(name.casefold().startswith('csrf') and value.strip() for name, value in data.items()):
+            raise ValueError('SubdomainFinderC99 returned an invalid CSRF page')
 
         data['scan_subdomains'] = ''
         data['domain'] = self.word
         data['privatequery'] = 'on'
         await asyncio.sleep(get_delay())
-        second_resp = await AsyncFetcher.post_fetch(self.server, headers=headers, proxy=self.proxy, data=ujson.dumps(data))
+        second_resp = await AsyncFetcher.post_fetch(
+            self.server,
+            headers=headers,
+            proxy=self.proxy,
+            data=ujson.dumps(data),
+            fail_on_http_error=True,
+            raise_on_error=True,
+        )
+        if not isinstance(second_resp, str) or not second_resp.strip():
+            raise ValueError('SubdomainFinderC99 returned an invalid result page')
+        if 'CSRF token invalid or expired' in second_resp:
+            raise RuntimeError('SubdomainFinderC99 rejected the CSRF token')
+        result_table = BeautifulSoup(second_resp, 'html.parser').find('table', {'id': 'result_table'})
+        if not isinstance(result_table, Tag):
+            raise ValueError('SubdomainFinderC99 returned an invalid result page')
 
         self.totalresults += second_resp
 
@@ -52,7 +77,7 @@ class SearchSubdomainfinderc99:
                     continue
                 name = c.get('name')
                 value = c.get('value')
-                if isinstance(name, str) and value is not None:
+                if isinstance(name, str) and name and value is not None:
                     csrf_params[name] = str(value)
             except Exception:
                 continue
