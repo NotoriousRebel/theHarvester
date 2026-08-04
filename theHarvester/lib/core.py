@@ -559,6 +559,8 @@ class AsyncFetcher:
         params: Sized = '',
         json: bool = False,
         proxy: bool = False,
+        fail_on_http_error: bool = False,
+        raise_on_error: bool = False,
     ):
         headers = cls._default_headers(headers)
         timeout = cls._request_timeout(720)
@@ -579,6 +581,7 @@ class AsyncFetcher:
                             proxy=proxy_url if proxy_type == 'http' else None,
                             json=json,
                             delay=5,
+                            fail_on_http_error=fail_on_http_error,
                         )
                 else:
                     async with await cls._build_session(headers, timeout, proxy_url, proxy_type, sslcontext) as session:
@@ -589,6 +592,7 @@ class AsyncFetcher:
                             proxy=proxy_url if proxy_type == 'http' else None,
                             json=json,
                             delay=5,
+                            fail_on_http_error=fail_on_http_error,
                         )
             elif params == '':
                 async with await cls._build_session(headers, timeout) as session:
@@ -599,6 +603,7 @@ class AsyncFetcher:
                         data=cls._normalize_data(data),
                         json=json,
                         delay=3,
+                        fail_on_http_error=fail_on_http_error,
                     )
             else:
                 async with await cls._build_session(headers, timeout) as session:
@@ -611,8 +616,11 @@ class AsyncFetcher:
                         params=params,
                         json=json,
                         delay=3,
+                        fail_on_http_error=fail_on_http_error,
                     )
         except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, UnicodeDecodeError, ValueError):
+            if raise_on_error:
+                raise
             return ''
 
     @classmethod
