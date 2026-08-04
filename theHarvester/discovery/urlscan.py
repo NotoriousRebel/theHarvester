@@ -12,8 +12,16 @@ class SearchUrlscan:
 
     async def do_search(self) -> None:
         url = f'https://urlscan.io/api/v1/search/?q=domain:{self.word}'
-        response = await AsyncFetcher.fetch_all([url], json=True, proxy=self.proxy)
-        resp = response[0]
+        resp = await AsyncFetcher.fetch(
+            url=url,
+            json=True,
+            proxy=self.proxy,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
+        )
+        if not isinstance(resp, dict) or not isinstance(resp.get('results'), list):
+            raise ValueError('URLScan returned an invalid payload')
         self.totalhosts = {f'{page["page"]["domain"]}' for page in resp['results']}
         self.totalips = {f'{page["page"]["ip"]}' for page in resp['results'] if 'ip' in page['page']}
         self.interestingurls = {
