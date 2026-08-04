@@ -9,7 +9,7 @@ class SearchBuiltWith:
     def __init__(self, word: str):
         self.word = word
         self.api_key = Core.builtwith_key()
-        if self.api_key is None:
+        if not self.api_key or not self.api_key.strip():
             raise MissingKey('BuiltWith')
         self.base_url = 'https://api.builtwith.com/v21/api.json'
         self.headers = {'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
@@ -33,6 +33,7 @@ class SearchBuiltWith:
                 json=False,
                 fail_on_http_error=True,
                 follow_redirects=False,
+                raise_on_error=True,
             )
         except RuntimeError as error:
             raise RuntimeError(f'BuiltWith returned {error}') from error
