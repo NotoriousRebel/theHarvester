@@ -1,4 +1,5 @@
 import logging
+import socket
 from collections import OrderedDict
 
 from shodan import Shodan, exception
@@ -10,20 +11,37 @@ logger = logging.getLogger(__name__)
 
 
 class SearchShodan:
-    def __init__(self) -> None:
+    def __init__(self, word: str | None = None) -> None:
+        self.word = word
         self.key = Core.shodan_key()
-        if self.key is None:
+        if not isinstance(self.key, str) or not self.key.strip():
             raise MissingKey('Shodan')
         self.api = Shodan(self.key)
+        self.hosts: set[str] = set()
         self.hostdatarow: list = []
         self.tracker: OrderedDict = OrderedDict()
 
-    async def search_ip(self, ip) -> OrderedDict:
+    async def process(self, proxy: bool = False) -> None:
+        if self.word is None:
+            raise ValueError('Shodan source requires a domain')
+        ip = socket.gethostbyname(self.word)
+        result = await self.search_ip(ip, raise_on_error=True)
+        if ip in result and isinstance(result[ip], dict):
+            hosts = {ip}
+            hosts.update(result[ip].get('hostnames', []))
+            self.hosts.update(hosts)
+
+    async def get_hostnames(self) -> list[str]:
+        return list(self.hosts)
+
+    async def search_ip(self, ip, *, raise_on_error: bool = False) -> OrderedDict:
         try:
             ipaddress = ip
             results = self.api.host(ipaddress)
 
-            if not results or 'data' not in results or not results['data']:
+            if not isinstance(results, dict) or 'data' not in results or not isinstance(results['data'], list):
+                raise ValueError('Shodan returned an invalid response')
+            if not results['data']:
                 logger.info(f'Shodan: No data found for IP {ip}')
                 return OrderedDict()
             asn = ''
@@ -109,9 +127,13 @@ class SearchShodan:
 
             return self.tracker
         except exception.APIError:
+            if raise_on_error:
+                raise
             logger.info(f'{ip}: Not in Shodan')
             self.tracker[ip] = 'Not in Shodan'
         except Exception as e:
+            if raise_on_error:
+                raise
             self.tracker[ip] = f'Error occurred in the Shodan IP search module: {e}'
 
         return self.tracker
