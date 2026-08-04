@@ -14,15 +14,15 @@ async def test_process_collects_more_than_one_cdx_page(monkeypatch: pytest.Monke
     requests: list[dict[str, list[str]]] = []
     requested_urls: list[str] = []
 
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
-        requested_urls.extend(urls)
-        query = parse_qs(urlparse(urls[0]).query)
+    async def fake_fetch(*, url: str, **_kwargs: object) -> str:
+        requested_urls.append(url)
+        query = parse_qs(urlparse(url).query)
         requests.append(query)
         if query['url'] == ['*.example.com']:
-            return [f'{first_page}\n\n{resume_key}'] if 'resumeKey' not in query else [second_page]
-        return ['']
+            return f'{first_page}\n\n{resume_key}' if 'resumeKey' not in query else second_page
+        return ''
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
     await search.process()
@@ -40,17 +40,18 @@ async def test_process_collects_more_than_one_cdx_page(monkeypatch: pytest.Monke
 async def test_process_stops_when_a_resume_key_repeats(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[dict[str, list[str]]] = []
 
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
-        query = parse_qs(urlparse(urls[0]).query)
+    async def fake_fetch(*, url: str, **_kwargs: object) -> str:
+        query = parse_qs(urlparse(url).query)
         requests.append(query)
         if query['url'] == ['*.example.com']:
-            return ['https://api.example.com/path\n\nrepeated-key']
-        return ['']
+            return 'https://api.example.com/path\n\nrepeated-key'
+        return ''
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
-    await search.process()
+    with pytest.raises(ValueError, match='pagination did not advance'):
+        await search.process()
 
     wildcard_requests = [query for query in requests if query['url'] == ['*.example.com']]
     assert len(wildcard_requests) == 2
@@ -70,14 +71,15 @@ async def test_process_normalizes_and_scope_checks_each_page(monkeypatch: pytest
         )
     )
 
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
-        query = parse_qs(urlparse(urls[0]).query)
-        return [payload] if query['url'] == ['*.example.com'] else ['']
+    async def fake_fetch(*, url: str, **_kwargs: object) -> str:
+        query = parse_qs(urlparse(url).query)
+        return payload if query['url'] == ['*.example.com'] else ''
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
-    await search.process()
+    with pytest.raises(ValueError, match='malformed data'):
+        await search.process()
 
     assert await search.get_hostnames() == {'api.example.com', 'example.com'}
 
@@ -86,12 +88,12 @@ async def test_process_normalizes_and_scope_checks_each_page(monkeypatch: pytest
 async def test_process_normalizes_the_requested_domain(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[dict[str, list[str]]] = []
 
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
-        query = parse_qs(urlparse(urls[0]).query)
+    async def fake_fetch(*, url: str, **_kwargs: object) -> str:
+        query = parse_qs(urlparse(url).query)
         requests.append(query)
-        return ['https://api.example.com/path'] if query['url'] == ['*.example.com'] else ['']
+        return 'https://api.example.com/path' if query['url'] == ['*.example.com'] else ''
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
 
     search = waybackarchive.SearchWaybackarchive('Example.COM.')
     await search.process()
@@ -105,19 +107,20 @@ async def test_process_keeps_partial_results_when_a_later_page_times_out(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
-        query = parse_qs(urlparse(urls[0]).query)
+    async def fake_fetch(*, url: str, **_kwargs: object) -> str:
+        query = parse_qs(urlparse(url).query)
         if query['url'] == ['*.example.com']:
             if 'resumeKey' in query:
                 raise TimeoutError
-            return ['https://api.example.com/path\n\nnext-page']
-        return ['https://example.com/path']
+            return 'https://api.example.com/path\n\nnext-page'
+        return 'https://example.com/path'
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
     with caplog.at_level(logging.INFO, logger=waybackarchive.__name__):
-        await search.process()
+        with pytest.raises(TimeoutError):
+            await search.process()
 
     assert await search.get_hostnames() == {'api.example.com', 'example.com'}
     assert 'Wayback Archive API error for pattern *.example.com' in caplog.text
@@ -125,30 +128,31 @@ async def test_process_keeps_partial_results_when_a_later_page_times_out(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ('payload', 'expected_log'),
+    ('payload', 'exception_type'),
     [
-        ('', 'returned no page data'),
-        ('<html>provider error</html>', 'returned invalid page data'),
-        ({'unexpected': 'shape'}, 'returned invalid page data'),
+        pytest.param('', None, id='valid-empty'),
+        pytest.param('<html>provider error</html>', RuntimeError, id='provider-error'),
+        pytest.param({'unexpected': 'shape'}, ValueError, id='non-text'),
     ],
 )
-async def test_process_ignores_empty_html_and_non_text_responses(
+async def test_process_distinguishes_empty_and_invalid_responses(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
     payload: object,
-    expected_log: str,
+    exception_type: type[Exception] | None,
 ) -> None:
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[object]:
-        return [payload]
+    async def fake_fetch(**_kwargs: object) -> object:
+        return payload
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
-    with caplog.at_level(logging.INFO, logger=waybackarchive.__name__):
+    if exception_type is None:
         await search.process()
+    else:
+        with pytest.raises(exception_type):
+            await search.process()
 
     assert await search.get_hostnames() == set()
-    assert expected_log in caplog.text
 
 
 @pytest.mark.asyncio
@@ -158,21 +162,22 @@ async def test_process_respects_the_per_query_page_bound(
 ) -> None:
     wildcard_requests = 0
 
-    async def fake_fetch_all(urls: list[str], **_kwargs: object) -> list[str]:
+    async def fake_fetch(*, url: str, **_kwargs: object) -> str:
         nonlocal wildcard_requests
-        query = parse_qs(urlparse(urls[0]).query)
+        query = parse_qs(urlparse(url).query)
         if query['url'] == ['*.example.com']:
             wildcard_requests += 1
-            return [f'https://host-{wildcard_requests}.example.com/path\n\npage-{wildcard_requests}']
-        return ['']
+            return f'https://host-{wildcard_requests}.example.com/path\n\npage-{wildcard_requests}'
+        return ''
 
-    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch_all', fake_fetch_all)
+    monkeypatch.setattr(waybackarchive.AsyncFetcher, 'fetch', fake_fetch)
     monkeypatch.setattr(waybackarchive.SearchWaybackarchive, 'MAX_PAGES_PER_QUERY', 2)
 
     search = waybackarchive.SearchWaybackarchive('example.com')
     with caplog.at_level(logging.INFO, logger=waybackarchive.__name__):
-        await search.process()
+        with pytest.raises(RuntimeError, match='page limit reached'):
+            await search.process()
 
     assert wildcard_requests == 2
     assert await search.get_hostnames() == {'host-1.example.com', 'host-2.example.com'}
-    assert 'Wayback Archive page limit reached for pattern *.example.com; results may be incomplete' in caplog.text
+    assert 'Wayback Archive API error for pattern *.example.com: Wayback Archive page limit reached' in caplog.text
