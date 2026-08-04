@@ -31,11 +31,7 @@ class SearchShodanInternetDB:
 
     async def do_search(self) -> None:
         # Resolve the domain to IP addresses first
-        try:
-            addr_infos = await asyncio.to_thread(socket.getaddrinfo, self.word, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        except socket.gaierror:
-            logger.info(f'Shodan InternetDB: Could not resolve domain {self.word}')
-            return
+        addr_infos = await asyncio.to_thread(socket.getaddrinfo, self.word, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
 
         # Deduplicate IPs from the resolution results
         resolved_ips: set[str] = set()
@@ -49,54 +45,86 @@ class SearchShodanInternetDB:
             return
 
         # Query InternetDB for each resolved IP
-        urls = [f'https://internetdb.shodan.io/{ip}' for ip in resolved_ips]
-        responses = await AsyncFetcher.fetch_all(urls, json=True, proxy=self.proxy)
+        requested_ips = sorted(resolved_ips)
+        urls = [f'https://internetdb.shodan.io/{ip}' for ip in requested_ips]
+        responses = await asyncio.gather(
+            *(
+                AsyncFetcher.fetch(
+                    url=url,
+                    json=True,
+                    proxy=self.proxy,
+                    request_timeout=60,
+                    fail_on_http_error=True,
+                    raise_on_error=True,
+                )
+                for url in urls
+            ),
+            return_exceptions=True,
+        )
 
-        for response in responses:
+        batch_error: Exception | None = None
+        for requested_ip, response in zip(requested_ips, responses, strict=True):
+            if isinstance(response, Exception):
+                if isinstance(response, RuntimeError) and str(response) == 'HTTP 404':
+                    continue
+                batch_error = batch_error or response
+                continue
             if not isinstance(response, dict):
+                batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
                 continue
 
-            # InternetDB returns a 404 as an empty JSON object or with a "detail" key
-            # when no data is found for an IP. Skip those.
+            # A successful no-data response uses a "detail" value.
             if 'detail' in response:
+                detail = response['detail']
+                if isinstance(detail, str) and detail.strip() == 'No information available':
+                    continue
+                if isinstance(detail, str) and detail.strip():
+                    batch_error = batch_error or RuntimeError('Shodan InternetDB returned a provider error')
+                    continue
+                batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
+                continue
+            if any(response.get(key) for key in ('error', 'message')):
+                batch_error = batch_error or RuntimeError('Shodan InternetDB returned a provider error')
+                continue
+            if response.get('ip') != requested_ip:
+                batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
                 continue
 
-            # Collect hostnames that match our target domain
-            for hostname in response.get('hostnames', []):
-                if isinstance(hostname, str) and (hostname == self.word or hostname.endswith('.' + self.word)):
-                    self.totalhosts.add(hostname)
+            has_data = False
+            hostnames = response.get('hostnames')
+            if not isinstance(hostnames, list):
+                batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
+            else:
+                for hostname in hostnames:
+                    if type(hostname) is not str:
+                        batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
+                        continue
+                    has_data = True
+                    if hostname == self.word or hostname.endswith('.' + self.word):
+                        self.totalhosts.add(hostname)
 
-            # Collect ports
-            for port in response.get('ports', []):
-                if isinstance(port, int):
-                    self.ports.add(port)
-
-            # Collect CVEs / vulnerabilities
-            for vuln in response.get('vulns', []):
-                if isinstance(vuln, str):
-                    self.vulns.add(vuln)
-
-            # Collect tags
-            for tag in response.get('tags', []):
-                if isinstance(tag, str):
-                    self.tags.add(tag)
-
-            # Collect CPEs
-            for cpe in response.get('cpes', []):
-                if isinstance(cpe, str):
-                    self.cpes.add(cpe)
-
-            # Add the IP if there was any data
-            if (
-                response.get('hostnames')
-                or response.get('ports')
-                or response.get('vulns')
-                or response.get('tags')
-                or response.get('cpes')
+            for key, item_type, destination in (
+                ('ports', int, self.ports),
+                ('vulns', str, self.vulns),
+                ('tags', str, self.tags),
+                ('cpes', str, self.cpes),
             ):
-                ip_str = response.get('ip', '')
-                if ip_str:
-                    self.totalips.add(str(ip_str))
+                values = response.get(key)
+                if not isinstance(values, list):
+                    batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
+                    continue
+                for item in values:
+                    if type(item) is not item_type:
+                        batch_error = batch_error or ValueError('Shodan InternetDB returned an invalid response')
+                        continue
+                    has_data = True
+                    destination.add(item)
+
+            if has_data:
+                self.totalips.add(requested_ip)
+
+        if batch_error is not None:
+            raise batch_error
 
     async def get_hostnames(self) -> set:
         return self.totalhosts
