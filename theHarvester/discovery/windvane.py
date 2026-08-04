@@ -1,6 +1,7 @@
 import json as _stdlib_json
 import logging
 from types import ModuleType
+from typing import Any
 
 from theHarvester.lib.core import AsyncFetcher, Core
 
@@ -29,7 +30,7 @@ class SearchWindvane:
 
     Note: This API requires authentication for full access.
     - With API key: Full access to all endpoints with pagination
-    - Without API key: Limited to 5 unauthenticated requests + DNS fallback
+    - Without API key: Limited unauthenticated endpoint access
 
     Set API key via:
     - Environment variable: export WINDVANE_API_KEY="your-key"
@@ -47,264 +48,182 @@ class SearchWindvane:
 
     def _get_api_key(self) -> str | None:
         try:
-            return Core.windvane_key()
-        except Exception:
-            # API key is optional for windvane - returns None for limited access
+            api_key = Core.windvane_key()
+        except (KeyError, TypeError):
             return None
+        if api_key is None:
+            return None
+        if not isinstance(api_key, str):
+            raise ValueError('Windvane API key must be a string')
+        return api_key.strip() or None
 
     @staticmethod
-    def _safe_parse_json(payload: object) -> dict:
-        # If already a dict, return it; if string, try parse; else return {}
+    def _parse_json(payload: object) -> dict[str, object]:
         if isinstance(payload, dict):
             return payload
         if isinstance(payload, str):
             try:
-                return json.loads(payload)
-            except Exception:
-                return {}
-        return {}
+                parsed = json.loads(payload)
+            except (TypeError, ValueError) as error:
+                raise ValueError('Windvane returned invalid JSON') from error
+            if isinstance(parsed, dict):
+                return parsed
+        raise ValueError('Windvane returned an invalid response')
+
+    @staticmethod
+    def _nonblank_string(value: object) -> str | None:
+        if isinstance(value, str) and (stripped := value.strip()):
+            return stripped
+        return None
+
+    @classmethod
+    def _parse_items(cls, payload: object) -> tuple[list[dict[str, Any]], bool]:
+        response_data = cls._parse_json(payload)
+        code = response_data.get('code')
+        if type(code) is not int:
+            raise ValueError('Windvane response is missing a valid code')
+        if code != 0:
+            raise RuntimeError(f'Windvane API returned code {code}')
+        data_section = response_data.get('data')
+        if not isinstance(data_section, dict):
+            raise ValueError('Windvane response has invalid data')
+        items = data_section.get('list')
+        if not isinstance(items, list):
+            raise ValueError('Windvane response has invalid results')
+        valid_items = [item for item in items if isinstance(item, dict)]
+        return valid_items, len(valid_items) != len(items)
 
     async def do_search(self) -> None:
         """Main search function that queries multiple Windvane API endpoints"""
-        try:
-            headers = {'User-agent': Core.get_user_agent(), 'Content-Type': 'application/json', 'Accept': 'application/json'}
+        headers = {'User-agent': Core.get_user_agent(), 'Content-Type': 'application/json', 'Accept': 'application/json'}
 
-            # Add API key if available
-            if self.api_key:
-                headers['X-Api-Key'] = self.api_key
-
-                # With API key, use full API endpoints
-                await self._search_subdomains(headers)
-                await self._search_dns_history(headers)
-                await self._search_emails(headers)
-            else:
-                # Without API key, try alternative/limited approaches
-                logger.info('[*] Windvane API key not found. Using limited unauthenticated access.')
-                await self._search_subdomains_limited(headers)
-
-        except Exception as e:
-            logger.info(f'Windvane API error: {e}')
+        if self.api_key:
+            headers['X-Api-Key'] = self.api_key
+            execution_error: Exception | None = None
+            for search in (self._search_subdomains, self._search_dns_history, self._search_emails):
+                try:
+                    await search(headers)
+                except Exception as error:
+                    logger.info(f'Windvane API error: {error}')
+                    if execution_error is None:
+                        execution_error = error
+            if execution_error is not None:
+                raise execution_error
+        else:
+            logger.info('[*] Windvane API key not found. Using limited unauthenticated access.')
+            await self._search_subdomains_limited(headers)
 
     async def _search_subdomains(self, headers: dict) -> None:
         """Search for subdomains using /ListSubDomain endpoint"""
-        try:
-            url = f'{self.hostname}/ListSubDomain'
-
-            # Use pagination to get more results
-            for page in range(1, 4):  # Get first 3 pages (up to 90 results)
-                data = {'domain': self.word, 'page_request': {'page': page, 'count': 30}}
-
-                try:
-                    response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
-                    if response:
-                        response_data = self._safe_parse_json(response)
-
-                        # Check if response is successful
-                        if response_data.get('code') == 0:
-                            data_section = response_data.get('data', {})
-                            subdomains = data_section.get('list', [])
-
-                            if not subdomains:
-                                break  # No more results
-
-                            for item in subdomains:
-                                if isinstance(item, dict):
-                                    domain = item.get('domain', '')
-                                    if domain and domain.endswith(self.word):
-                                        self.totalhosts.add(domain.lower())
-                        else:
-                            # API error - stop pagination
-                            if response_data.get('code') != 0:
-                                logger.info(f'Windvane subdomain API returned code {response_data.get("code")}')
-                            break
-
-                except Exception as e:
-                    logger.info(f'Windvane subdomain request failed: {e}')
-                    break
-
-        except Exception as e:
-            logger.info(f'Windvane subdomain search error: {e}')
+        url = f'{self.hostname}/ListSubDomain'
+        for page in range(1, 4):
+            data = {'domain': self.word, 'page_request': {'page': page, 'count': 30}}
+            response = await AsyncFetcher.post_fetch(
+                url,
+                headers=headers,
+                data=json.dumps(data),
+                proxy=self.proxy,
+                fail_on_http_error=True,
+                raise_on_error=True,
+            )
+            subdomains, malformed_row = self._parse_items(response)
+            for item in subdomains:
+                domain = self._nonblank_string(item.get('domain'))
+                if domain is None:
+                    malformed_row = True
+                    continue
+                if domain and domain.endswith(self.word):
+                    self.totalhosts.add(domain.lower())
+            if malformed_row:
+                raise ValueError('Windvane returned malformed subdomain data')
+            if not subdomains:
+                return
+        raise RuntimeError('Windvane subdomain page limit reached')
 
     async def _search_dns_history(self, headers: dict) -> None:
         """Search DNS history using /ListDNS endpoint for additional subdomains and IPs"""
-        try:
-            url = f'{self.hostname}/ListDNS'
-
-            # Get DNS history records
-            for page in range(1, 3):  # Get first 2 pages
-                data = {'domain': self.word, 'page_request': {'page': page, 'count': 30}}
-
-                try:
-                    response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
-                    if response:
-                        response_data = self._safe_parse_json(response)
-
-                        if response_data.get('code') == 0:
-                            data_section = response_data.get('data', {})
-                            dns_records = data_section.get('list', [])
-
-                            if not dns_records:
-                                break
-
-                            for record in dns_records:
-                                if isinstance(record, dict):
-                                    domain = record.get('domain', '')
-                                    answer = record.get('answer', '')
-                                    answer_type = record.get('answer_type', '')
-
-                                    # Add subdomains
-                                    if domain and domain.endswith(self.word):
-                                        self.totalhosts.add(domain.lower())
-
-                                    # Add IP addresses from A records
-                                    if answer and answer_type == 'A' and self._is_valid_ip(answer):
-                                        self.totalips.add(answer)
-                        else:
-                            break
-
-                except Exception as e:
-                    logger.info(f'Windvane DNS history request failed: {e}')
-                    break
-
-        except Exception as e:
-            logger.info(f'Windvane DNS history search error: {e}')
+        url = f'{self.hostname}/ListDNS'
+        for page in range(1, 3):
+            data = {'domain': self.word, 'page_request': {'page': page, 'count': 30}}
+            response = await AsyncFetcher.post_fetch(
+                url,
+                headers=headers,
+                data=json.dumps(data),
+                proxy=self.proxy,
+                fail_on_http_error=True,
+                raise_on_error=True,
+            )
+            dns_records, malformed_row = self._parse_items(response)
+            for record in dns_records:
+                domain = self._nonblank_string(record.get('domain'))
+                answer = self._nonblank_string(record.get('answer'))
+                answer_type = self._nonblank_string(record.get('answer_type'))
+                if domain is None or answer is None or answer_type is None:
+                    malformed_row = True
+                    continue
+                if domain.endswith(self.word):
+                    self.totalhosts.add(domain.lower())
+                if answer_type == 'A' and self._is_valid_ip(answer):
+                    self.totalips.add(answer)
+            if malformed_row:
+                raise ValueError('Windvane returned malformed DNS history data')
+            if not dns_records:
+                return
+        raise RuntimeError('Windvane DNS history page limit reached')
 
     async def _search_emails(self, headers: dict) -> None:
         """Search for emails using /ListEmail endpoint"""
-        try:
-            url = f'{self.hostname}/ListEmail'
-
-            data = {'email': self.word, 'page_request': {'page': 1, 'count': 50}}
-
-            try:
-                response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
-                if response:
-                    response_data = self._safe_parse_json(response)
-
-                    if response_data.get('code') == 0:
-                        data_section = response_data.get('data', {})
-                        email_results = data_section.get('list', [])
-
-                        for item in email_results:
-                            if isinstance(item, dict):
-                                email = item.get('email', '')
-                                if email and self.word in email:
-                                    self.totalemails.add(email.lower())
-
-                                # Also extract domain from whois data if available
-                                domain = item.get('domain', '')
-                                if domain and domain.endswith(self.word):
-                                    self.totalhosts.add(domain.lower())
-
-            except Exception as e:
-                logger.info(f'Windvane email search request failed: {e}')
-
-        except Exception as e:
-            logger.info(f'Windvane email search error: {e}')
+        url = f'{self.hostname}/ListEmail'
+        data = {'email': self.word, 'page_request': {'page': 1, 'count': 50}}
+        response = await AsyncFetcher.post_fetch(
+            url,
+            headers=headers,
+            data=json.dumps(data),
+            proxy=self.proxy,
+            fail_on_http_error=True,
+            raise_on_error=True,
+        )
+        email_results, malformed_row = self._parse_items(response)
+        for item in email_results:
+            email = self._nonblank_string(item.get('email'))
+            domain_value = item.get('domain')
+            domain = self._nonblank_string(domain_value)
+            if email is None or (domain_value not in (None, '') and domain is None):
+                malformed_row = True
+                continue
+            if self.word in email:
+                self.totalemails.add(email.lower())
+            if domain and domain.endswith(self.word):
+                self.totalhosts.add(domain.lower())
+        if malformed_row:
+            raise ValueError('Windvane returned malformed email data')
 
     async def _search_subdomains_limited(self, headers: dict) -> None:
         """Limited subdomain search without API key - tries simpler approaches"""
-        try:
-            # Try basic subdomain endpoint with minimal parameters
-            url = f'{self.hostname}/ListSubDomain'
+        url = f'{self.hostname}/ListSubDomain'
+        data = {'domain': self.word, 'page_request': {'page': 1, 'count': 10}}
+        response = await AsyncFetcher.post_fetch(
+            url,
+            headers=headers,
+            data=json.dumps(data),
+            proxy=self.proxy,
+            fail_on_http_error=True,
+            raise_on_error=True,
+        )
+        subdomains, malformed_row = self._parse_items(response)
 
-            # Simple request with just domain - limited to 5 calls
-            data = {
-                'domain': self.word,
-                'page_request': {
-                    'page': 1,
-                    'count': 10,  # Smaller count for unauthenticated
-                },
-            }
+        for item in subdomains:
+            domain = self._nonblank_string(item.get('domain'))
+            if domain is None:
+                malformed_row = True
+                continue
+            if domain and domain.endswith(self.word):
+                self.totalhosts.add(domain.lower())
 
-            try:
-                response = await AsyncFetcher.post_fetch(url, headers=headers, data=json.dumps(data), proxy=self.proxy)
-                if response:
-                    response_data = self._safe_parse_json(response)
+        if malformed_row:
+            raise ValueError('Windvane returned malformed subdomain data')
 
-                    if isinstance(response_data, dict) and response_data.get('code') == 0:
-                        data_section = response_data.get('data', {})
-                        subdomains = data_section.get('list', [])
-
-                        for item in subdomains:
-                            if isinstance(item, dict):
-                                domain = item.get('domain', '')
-                                if domain and domain.endswith(self.word):
-                                    self.totalhosts.add(domain.lower())
-
-                        logger.info(f'[*] Found {len(subdomains)} subdomains with limited access')
-                    else:
-                        # If API call fails, try fallback approaches
-                        await self._fallback_search()
-
-            except Exception as e:
-                logger.info(f'Windvane limited API failed: {e}')
-                await self._fallback_search()
-
-        except Exception as e:
-            logger.info(f'Windvane limited search error: {e}')
-
-    async def _fallback_search(self) -> None:
-        """Fallback search using common subdomain patterns when API is unavailable"""
-        try:
-            logger.info('[*] API unavailable, using fallback subdomain pattern search...')
-
-            # Common subdomain prefixes to try
-            common_subdomains = [
-                'www',
-                'mail',
-                'ftp',
-                'admin',
-                'test',
-                'dev',
-                'staging',
-                'api',
-                'cdn',
-                'blog',
-                'shop',
-                'portal',
-                'app',
-                'mobile',
-                'secure',
-                'login',
-                'support',
-                'help',
-                'docs',
-                'status',
-            ]
-
-            # Try to resolve common subdomains (basic DNS lookup approach)
-            import asyncio
-            import socket
-
-            found_count = 0
-            for sub in common_subdomains:
-                subdomain = f'{sub}.{self.word}'
-                try:
-                    # Simple DNS resolution check
-                    await asyncio.sleep(0.1)  # Rate limiting
-
-                    # Use a simple DNS lookup (non-blocking)
-                    loop = asyncio.get_event_loop()
-                    try:
-                        result = await loop.run_in_executor(None, socket.gethostbyname, subdomain)
-                        if result:
-                            self.totalhosts.add(subdomain.lower())
-                            self.totalips.add(result)
-                            found_count += 1
-                    except socket.gaierror:
-                        pass  # Subdomain doesn't exist
-
-                except Exception:
-                    continue
-
-            if found_count > 0:
-                logger.info(f'[*] Found {found_count} subdomains using DNS fallback')
-            else:
-                logger.info('[*] No additional subdomains found via fallback methods')
-
-        except Exception as e:
-            logger.info(f'Fallback search error: {e}')
+        logger.info(f'[*] Found {len(subdomains)} subdomains with limited access')
 
     def set_api_key(self, api_key: str) -> None:
         """Set the API key for authenticated requests
@@ -313,7 +232,7 @@ class SearchWindvane:
             api_key: Windvane API key for authenticated access
 
         """
-        self.api_key = api_key
+        self.api_key = api_key.strip() or None
 
     def _is_valid_ip(self, ip: str) -> bool:
         """Validate if string is a valid IP address"""
