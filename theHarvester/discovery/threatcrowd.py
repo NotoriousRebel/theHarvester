@@ -1,10 +1,7 @@
 import json as _stdlib_json
-import logging
 from types import ModuleType
 
 from theHarvester.lib.core import AsyncFetcher, Core
-
-logger = logging.getLogger(__name__)
 
 json: ModuleType = _stdlib_json
 try:
@@ -28,67 +25,51 @@ class SearchThreatcrowd:
         self.hostname = 'http://ci-www.threatcrowd.org'
 
     @staticmethod
-    def _safe_parse_json(payload: object) -> dict:
+    def _parse_json(payload: object) -> dict:
         if isinstance(payload, dict):
             return payload
         if isinstance(payload, str):
             try:
-                return json.loads(payload)
-            except Exception:
-                return {}
-        return {}
+                payload = json.loads(payload)
+            except Exception as error:
+                raise ValueError('ThreatCrowd returned an invalid payload') from error
+        if not isinstance(payload, dict):
+            raise ValueError('ThreatCrowd returned an invalid payload')
+        return payload
 
     async def do_search(self) -> None:
-        try:
-            headers = {'User-agent': Core.get_user_agent()}
+        headers = {'User-agent': Core.get_user_agent()}
+        url = f'{self.hostname}/searchApi/v2/domain/report/?domain={self.word}'
+        response = await AsyncFetcher.fetch(
+            url=url,
+            headers=headers,
+            proxy=self.proxy,
+            fail_on_http_error=True,
+            follow_redirects=False,
+            raise_on_error=True,
+        )
+        data = self._parse_json(response)
+        response_code = data.get('response_code')
+        if response_code not in (1, '1'):
+            raise ValueError(f'ThreatCrowd API returned error code: {response_code}')
 
-            # ThreatCrowd domain report API
-            url = f'{self.hostname}/searchApi/v2/domain/report/?domain={self.word}'
+        subdomains = data.get('subdomains')
+        resolutions = data.get('resolutions')
+        if not isinstance(subdomains, list) or not isinstance(resolutions, list):
+            raise ValueError('ThreatCrowd returned invalid result collections')
+        for subdomain in subdomains:
+            if isinstance(subdomain, str) and subdomain.strip():
+                clean_subdomain = subdomain.strip().lower()
+                if clean_subdomain.endswith(f'.{self.word}') or clean_subdomain == self.word:
+                    self.totalhosts.add(clean_subdomain)
 
-            response = await AsyncFetcher.fetch_all([url], headers=headers, proxy=self.proxy)
-
-            if not response or not isinstance(response, list) or not response[0]:
-                logger.info(f'No response from ThreatCrowd API for: {self.word}')
-                return
-
-            try:
-                data = self._safe_parse_json(response[0])
-
-                if isinstance(data, dict):
-                    # Check response code - '1' means success in ThreatCrowd API
-                    response_code = data.get('response_code', '')
-                    if response_code and response_code != '1':
-                        logger.info(f'ThreatCrowd API returned error code: {response_code}')
-                        return
-
-                    # Extract subdomains - direct list in response
-                    subdomains = data.get('subdomains', [])
-                    if isinstance(subdomains, list):
-                        for subdomain in subdomains:
-                            if isinstance(subdomain, str) and subdomain.strip():
-                                # ThreatCrowd returns full subdomains, not relative ones
-                                clean_subdomain = subdomain.strip().lower()
-                                if clean_subdomain.endswith(f'.{self.word}') or clean_subdomain == self.word:
-                                    self.totalhosts.add(clean_subdomain)
-
-                    # Extract IPs if available (from resolutions)
-                    resolutions = data.get('resolutions', [])
-                    if isinstance(resolutions, list):
-                        for resolution in resolutions:
-                            if isinstance(resolution, dict):
-                                ip = resolution.get('ip_address', '')
-                                if ip and ip.strip():
-                                    self.totalips.add(ip.strip())
-                            elif isinstance(resolution, str):
-                                # Sometimes IPs are directly in the list
-                                if resolution.strip():
-                                    self.totalips.add(resolution.strip())
-
-            except Exception as e:
-                logger.info(f'Failed to parse ThreatCrowd response: {e}')
-
-        except Exception as e:
-            logger.info(f'ThreatCrowd API error: {e}')
+        for resolution in resolutions:
+            if isinstance(resolution, dict):
+                ip = resolution.get('ip_address', '')
+                if ip and ip.strip():
+                    self.totalips.add(ip.strip())
+            elif isinstance(resolution, str) and resolution.strip():
+                self.totalips.add(resolution.strip())
 
     async def get_hostnames(self) -> set:
         return self.totalhosts
