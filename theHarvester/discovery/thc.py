@@ -4,6 +4,7 @@ import logging
 import aiohttp
 
 from theHarvester.lib.core import Core
+from theHarvester.lib.hostnames import normalize_hostname
 
 logger = logging.getLogger(__name__)
 
@@ -23,38 +24,38 @@ class SearchThc:
         headers = {'User-Agent': Core.get_user_agent()}
 
         for attempt in range(self.max_retries):
-            try:
-                timeout = aiohttp.ClientTimeout(total=60)
-                async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                    async with session.get(url) as response:
-                        if response.status == 429:
-                            rate_remaining = response.headers.get('x-ratelimit-remaining', '0')
-                            wait_time = self.base_delay * (attempt + 1)
-                            logger.info(f'THC rate limit hit (remaining: {rate_remaining}). Waiting {wait_time}s before retry...')
-                            await asyncio.sleep(wait_time)
-                            continue
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status == 429:
+                        if attempt == self.max_retries - 1:
+                            raise RuntimeError('THC rate limit retry limit exhausted')
+                        rate_remaining = response.headers.get('x-ratelimit-remaining', '0')
+                        wait_time = self.base_delay * (attempt + 1)
+                        logger.info(f'THC rate limit hit (remaining: {rate_remaining}). Waiting {wait_time}s before retry...')
+                        await asyncio.sleep(wait_time)
+                        continue
 
-                        if response.status != 200:
-                            logger.info(f'THC returned status {response.status}')
-                            return
+                    if response.status != 200:
+                        raise RuntimeError(f'THC returned HTTP {response.status}')
 
-                        text = await response.text()
-                        if text:
-                            for line in text.splitlines():
-                                hostname = line.strip().lower()
-                                if hostname and self.word.lower() in hostname:
-                                    self.results.add(hostname)
+                    text = await response.text()
+                    if not text.strip():
                         return
-
-            except Exception as e:
-                error_msg = str(e).lower()
-                if '429' in error_msg or 'rate' in error_msg:
-                    wait_time = self.base_delay * (attempt + 1)
-                    logger.info(f'THC rate limit detected. Waiting {wait_time}s before retry...')
-                    await asyncio.sleep(wait_time)
-                    continue
-                logger.info(f'An exception has occurred in THC: {e}')
-                return
+                    if normalize_hostname(self.word) is None:
+                        return
+                    malformed = False
+                    for line in text.splitlines():
+                        if not line.strip():
+                            continue
+                        hostname = normalize_hostname(line)
+                        if hostname is None:
+                            malformed = True
+                            continue
+                        self.results.add(hostname)
+                    if malformed:
+                        raise ValueError('THC returned an invalid response')
+                    return
 
     async def get_hostnames(self) -> set:
         return self.results
