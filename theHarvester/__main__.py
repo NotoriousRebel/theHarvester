@@ -982,48 +982,7 @@ async def start(rest_args: argparse.Namespace | None = None):
                             show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'shodan':
-                    try:
-                        # For normal module usage, we need to create a wrapper that works with the store function
-                        class ShodanWrapper:
-                            def __init__(self, domain, shodan_client):
-                                self.word = domain
-                                self.hosts = set()
-                                self.shodan = shodan_client
-
-                            async def process(self, use_proxy: bool = False):
-                                import socket
-
-                                try:
-                                    # Resolve domain to IP and search in Shodan
-                                    ip = socket.gethostbyname(self.word)
-                                    output_logger.info(f'\tSearching Shodan for {ip}')
-                                    result = await self.shodan.search_ip(ip)
-                                    if ip in result and isinstance(result[ip], dict):
-                                        # Add the IP as a host for consistency with other modules
-                                        self.hosts.add(ip)
-
-                                        for host in result[ip].get('hostnames', []):
-                                            self.hosts.add(host)
-
-                                        output_logger.info(f'Found Shodan data for {ip}')
-                                    elif ip in result and isinstance(result[ip], str):
-                                        output_logger.info(f'{ip}: {result[ip]}')
-                                except Exception as e:
-                                    output_logger.info(f'Error in Shodan search: {e}')
-
-                            async def get_hostnames(self):
-                                return list(self.hosts)
-
-                        def shodan_factory() -> ShodanWrapper:
-                            return ShodanWrapper(word, shodansearch.SearchShodan())
-
-                        stor_lst.append(store(shodan_factory, engineitem))
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in Shodan search: {e}')
-                        else:
-                            output_logger.info(f'An exception has occurred in Shodan search: {e}')
+                    stor_lst.append(store(partial(shodansearch.SearchShodan, word), engineitem))
 
                 elif engineitem == 'shodanInternetDB':
                     try:
