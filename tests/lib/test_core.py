@@ -311,6 +311,32 @@ async def test_fetch_can_propagate_transport_errors(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_fetch_can_report_http_errors(monkeypatch) -> None:
+    class ErrorSession(DummySession):
+        def request(self, method: str, url: str, **kwargs):
+            self.requests.append((method, url, kwargs))
+            return DummyResponse(status=503)
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', ErrorSession)
+    monkeypatch.setattr(core_module.asyncio, 'sleep', fake_sleep)
+
+    with pytest.raises(RuntimeError, match='HTTP 503'):
+        await AsyncFetcher.post_fetch('https://example.com', data={}, fail_on_http_error=True)
+
+
+@pytest.mark.asyncio
+async def test_post_fetch_can_propagate_transport_errors(monkeypatch) -> None:
+    async def fail_to_build_session(*_args, **_kwargs):
+        raise TimeoutError('provider timed out')
+
+    monkeypatch.setattr(AsyncFetcher, '_build_session', fail_to_build_session)
+
+    with pytest.raises(TimeoutError, match='provider timed out'):
+        await AsyncFetcher.post_fetch('https://example.com', data={}, raise_on_error=True)
+
+
+@pytest.mark.asyncio
 async def test_post_fetch_decodes_string_payload_and_posts_params(monkeypatch) -> None:
     reset_dummy_sessions()
     monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
