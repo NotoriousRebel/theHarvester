@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the nonfunctional ThreatCrowd source because its service hostnames terminate at deleted AWS load balancers and return NXDOMAIN; OTX remains available through its separate adapter.
 
 ### Fixed
+- Made FullHunt reject empty credentials, report HTTP and malformed-response failures, and isolate malformed host records.
 - Made Fofa reject incomplete credentials, report HTTP and malformed-response failures, normalize scoped hosts, and discard invalid IP values.
 - Made Chaos reject empty credentials, report HTTP and malformed-response failures, and preserve supported subdomain response shapes.
 - Made Hudson Rock HTTP failures status-aware, bounded rate-limit retries, removed trailing request delays, isolated malformed provider items, and retained infostealer details in completed JSONL and SQLite results.
