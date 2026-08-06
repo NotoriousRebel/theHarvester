@@ -11,15 +11,17 @@ or retaining raw provider payloads?
 
 ## Outcome
 
-The best next implementation remains **Arquivo.pt**. It is a no-key P0 source,
-has a documented domain-match API and explicit limits, and may add historical
-hostnames not returned by the current Common Crawl and Internet Archive
-adapters.
+The best next implementation is **Shodan CT**, salvaged from fork PR #144 onto
+current upstream `dev`. Its first-party service documents a no-key hostname
+endpoint, and a bounded `mozilla.org` pilot returned 208 distinct names.
 
-The smallest no-key follow-up candidate is **ThreatMiner**. Its contract is one
-documented request with a clear 10-query-per-minute ceiling and a CC BY 4.0
-service license, but current corpus freshness is not documented. Require current
-official activity evidence or a consented yield pilot before implementation.
+**Arquivo.pt is no longer an implementation recommendation.** Its endpoint is
+healthy, but a bounded `mozilla.org` pilot with `limit=10000` produced only one
+distinct subdomain, `www.mozilla.org`, because repeated apex captures consume
+the result window. Provider-side exclusion filters timed out in bounded probes.
+
+**ThreatMiner is not currently viable.** Its documented domain endpoint returned
+HTTP 500 with an empty body during the consented `mozilla.org` pilot.
 
 The strongest newly discovered candidate is **sub.md**. Its API contract is
 excellent and anonymous access is practical, but no public terms or explicit
@@ -27,8 +29,8 @@ redistribution policy was linked from the service or API documentation. It
 should not ship until maintainers receive written confirmation that an
 open-source client may make automated queries and emit normalized names.
 
-No live target enumeration was performed. Candidate yield is therefore a
-hypothesis to test later against consented targets, not a measured ranking.
+Live P0 checks used only the user-approved `mozilla.org` target. No target was
+contacted directly and no active scan was requested.
 
 ## Baseline and method
 
@@ -63,8 +65,8 @@ Activity classes follow the repository glossary:
 
 | Rank | Candidate | Activity | Access | Domain-in output | Maintenance | Adapter size | Decision |
 |---:|---|---:|---|---|---|---|---|
-| 1 | Arquivo.pt CDX | P0 | No key | Subdomains; historical URLs are available but should be deferred | Current official API documentation | Small, one bounded JSON request | Implement first |
-| 2 | ThreatMiner | P0 | No key | Subdomains first; passive-DNS IPs are a later contract | First-party API page is reachable; corpus freshness is unverified | Very small, one JSON request | Require freshness evidence or a consented pilot |
+| 1 | Shodan CT | P0 | No key | Certificate-associated hostnames | Live first-party service and current Subfinder adapter | Very small, one JSON request | Salvage fork PR #144 first |
+| 2 | Arquivo.pt CDX | P0 | No key | Historical hostnames | Current official API documentation | Small, one bounded NDJSON request | Park after low-yield pilot |
 | 3 | sub.md | P0 | No key or optional Bearer key | Subdomains | Live health indicator, current docs, current Subfinder adapter | Very small, newline parser | Terms clarification first |
 | 4 | WhoisFreaks Subdomains | P0 | Credit-based API key | Active and inactive nested subdomains | Current 2026 docs, SDKs, and status surfaces | Small, paginated JSON | Require a test key and usage-rights confirmation |
 | 5 | Sourcegraph stream search | P0 | Public search works without a token | Subdomains and target-domain emails found in public code | Current API docs; AUP updated 2026-06-12 | Medium, bounded SSE parser | Pilot after simpler sources |
@@ -77,7 +79,30 @@ parked below.
 
 ## Candidate evidence
 
-### 1. Arquivo.pt CDX
+### 1. Shodan CT
+
+**Why it is interesting:** Shodan's public CT mirror has a direct hostname
+endpoint and useful coverage within the same CT source family as `crtsh` and
+`certspotter`. It must not be treated as independent corroboration. The
+first-party landing page documents `GET /api/v1/domain/{domain}/hostnames`. A
+bounded 2026-08-06 pilot returned HTTP 200 and 208 distinct `mozilla.org` names,
+including nested hostnames:
+[Shodan CT Logs API](https://ctl.shodan.io/).
+
+**Use boundary:** Shodan's service terms govern website and API plans, require
+Shodan attribution when its information is included in other materials, and say
+no fixed transmission limit is currently promised. The adapter makes one serial
+request per selected target, retains only normalized names, and identifies the
+source as Shodan CT in code, help, and documentation. It does not copy or resell
+the service or its raw response:
+[Shodan terms](https://static.shodan.io/legal/terms.html).
+
+**Existing work:** fork PR #144 already contains the adapter and offline
+contracts. Its base predates the current source catalog and completed-result
+seams, so salvage the focused provider behavior onto current upstream `dev`
+instead of merging the stale branch wholesale.
+
+### 2. Arquivo.pt CDX
 
 **Why it is interesting:** its documented CDX service is a separately operated
 web-archive interface that may expose historical names not returned by the
@@ -85,7 +110,7 @@ current Common Crawl and Internet Archive adapters. Exclusive yield remains a
 hypothesis for a consented comparison, not an established corpus distinction.
 
 **Contract:** query `GET https://arquivo.pt/wayback/cdx` with a domain match,
-request JSON, select only the archived URL and capture timestamp, and apply one
+request newline-delimited JSON, select only archived URLs, and apply one
 operator-bounded result limit. Do not download archived page bodies. The
 official CDX documentation describes domain and wildcard matching:
 [CDX API](https://github.com/arquivo/pwa-technologies/wiki/URL-search:-CDX-server-API).
@@ -99,7 +124,12 @@ request per target stays far below that boundary:
 normalized exact-suffix hostnames only in its first slice. It should not mirror
 page content, snippets, or raw CDX responses.
 
-### 2. ThreatMiner
+**Measured limitation:** `limit=10,000` yielded only `www.mozilla.org` after
+normalization. `collapse=urlkey` did not collapse duplicate rows, and bounded
+negative-filter probes timed out. Do not ship an adapter until a documented,
+bounded query can reach descendant keys without downloading a huge capture set.
+
+### ThreatMiner
 
 **Why it is interesting:** ThreatMiner is a threat-intelligence corpus rather
 than another general CT or web index. Its historical or incident-linked names
@@ -114,9 +144,8 @@ be a separate follow-up after its IP schema and provenance are fixture-tested.
 key, and identifies the non-profit service as licensed under Creative Commons
 Attribution 4.0: [ThreatMiner API](https://www.threatminer.org/api.php).
 
-**Caveat:** no pagination, result cap, dataset timestamp, or completeness signal
-is documented. The adapter must report a bounded single-request completion and
-must not imply exhaustive coverage.
+**Current failure:** the documented `rt=5` endpoint returned HTTP 500 with an
+empty body on 2026-08-06. Do not implement while the public contract is failing.
 
 ### 3. sub.md
 
@@ -214,40 +243,38 @@ documents above do not establish those rights.
 | recon.cloud | P0 | Reject as dead. Both the service host and the endpoint used by Subfinder failed DNS resolution on 2026-08-06. | [Subfinder adapter](https://github.com/projectdiscovery/subfinder/tree/dev/pkg/subscraping/sources/reconcloud) |
 | SubDomainRadar | P2 | Park as explicit active work only. Its managed task can run deeper enumeration and must never be included in `all` as a passive replacement. | [API docs](https://api.subdomainradar.io/docs) |
 | BinaryEdge | P0 historically | Reject. Standalone BinaryEdge products and data access shut down on 2025-03-31. | [transition FAQ](https://help.coalitioninc.com/hc/en-us/articles/34383910057371-BinaryEdge-Transition-FAQ) |
+| ThreatMiner | P0 | Reject for now. The documented domain endpoint returned HTTP 500 with an empty body during a bounded `mozilla.org` check on 2026-08-06. | [API documentation](https://www.threatminer.org/api.php) |
 | ThreatCrowd | P0 historically | Reject as dead. The provider aliases end in AWS load-balancer DNS names that return `NXDOMAIN`, and the supported OTX API is already represented separately. | [local service-status research](../threatcrowd-service-status.md) |
 
 The following prior decisions remain unchanged: park CIRCL PassiveDNS because
 access is restricted to trusted partners; park MerkleMap because API docs and
-automation terms conflict; reject AnubisDB and MySSL until first-party limits
-and redistribution contracts exist; do not wrap Subfinder, Amass, or BBOT as a
-single source because that would erase provenance and duplicate requests.
+automation terms conflict; reject AnubisDB because its current redirect ended
+at a Cloudflare HTTP 403 and no usable first-party contract was available;
+reject MySSL until first-party limits and redistribution contracts exist; do
+not wrap Subfinder, Amass, or BBOT as a single source because that would erase
+provenance and duplicate requests.
 
 ## Recommended first implementation slice
 
-Implement **Arquivo.pt hostname collection only** from the current upstream
-`dev`:
+Salvage **Shodan CT hostname collection only** from fork PR #144 onto current
+upstream `dev`:
 
-1. Add one P0 source catalog entry with the `subdomains` route.
-2. Make one bounded `GET https://arquivo.pt/wayback/cdx` domain-match request.
-3. Request JSON and only the fields needed to extract the archived URL and
-   capture timestamp.
-4. Normalize exact-suffix hostnames through the existing shared hostname seam.
-5. Treat `200` with no names as empty; attribute terminal HTTP, rate-limit, and
-   malformed-body outcomes without retaining the raw response.
-6. Add offline fixtures for repeated captures, nested names, unrelated suffixes,
-   malformed rows, and a terminal `429`.
-7. Preserve CLI, REST, JSON, JSONL, XML, SQLite, and public getter contracts.
+1. Keep one bounded no-key request to the documented hostname endpoint.
+2. Normalize exact-suffix hostnames through the existing shared hostname seam.
+3. Preserve `www`, reduce wildcard certificate names to their concrete suffix,
+   and exclude malformed or out-of-scope names.
+4. Attribute transport, non-success, rate-limit, and malformed-body outcomes.
+5. Register only the `subdomains` route and preserve existing CLI, REST, JSON,
+   JSONL, XML, SQLite, and public getter contracts.
+6. Add offline fixtures for success, malformed rows, non-success, and `429`.
 
-Do not add archived page downloads or emit every historical URL in this slice.
-Those outputs can multiply storage and may carry unrelated personal or
-copyrighted content. Hostname yield answers the immediate replacement need.
+Do not import the stale run-evidence abstractions from PR #144. Current upstream
+already owns the collection and output seams.
 
-ThreatMiner `rt=5` is the next candidate to evaluate after current activity or
-consented yield evidence is available. Evaluate sub.md only after the rights
-question is answered. These providers do not depend on one another, so any
-eventual implementation PRs should be reviewed as a small parallel batch rather
-than a dependency stack. Use a true stacked PR only when a shared transport or
-output prerequisite creates a real dependency.
+Evaluate sub.md only after the rights question is answered. Independent
+providers should be reviewed as a small parallel batch, not a dependency stack.
+Use a true stacked PR only when a shared transport or output prerequisite
+creates a real dependency.
 
 ## Later yield experiment
 
