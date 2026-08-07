@@ -6,19 +6,6 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 
 
-def test_worker_layer_preserves_the_existing_api_root(tmp_path, monkeypatch) -> None:
-    from theHarvester.lib.api import api
-
-    monkeypatch.setenv('THEHARVESTER_WAYFINDER_DB', str(tmp_path / 'wayfinder.sqlite'))
-    monkeypatch.setenv('THEHARVESTER_WAYFINDER_WORKER', 'disabled')
-
-    with TestClient(api.app, base_url='http://127.0.0.1', client=('127.0.0.1', 50000)) as client:
-        response = client.get('/')
-
-    assert response.status_code == 200
-    assert 'API Documentation' in response.text
-
-
 def test_orphan_recovery_reattaches_partial_checkpoint(tmp_path, monkeypatch) -> None:
     from theHarvester.lib.api import wayfinder
     from theHarvester.lib.completed_result import CompletedResult

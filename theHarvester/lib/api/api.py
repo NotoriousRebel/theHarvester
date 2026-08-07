@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -22,6 +22,7 @@ from theHarvester.lib.api.auth import get_api_key
 from theHarvester.lib.api.rate_limit import API_RATE_LIMIT, limiter
 from theHarvester.lib.api.wayfinder import is_public_target, start_worker, stop_worker
 from theHarvester.lib.api.wayfinder import router as wayfinder_router
+from theHarvester.lib.api.wayfinder import ui_router as wayfinder_ui_router
 from theHarvester.lib.completed_result import CompletedResult, ResultKind
 from theHarvester.lib.enumeration import EnumerationOptions
 from theHarvester.lib.recursive_dns import DEFAULT_RECURSIVE_DNS_QUERY_LIMIT
@@ -90,6 +91,7 @@ app.add_middleware(
 
 # Include additional endpoints
 app.include_router(additional_router, prefix='/additional', tags=['Additional APIs'])
+app.include_router(wayfinder_ui_router)
 app.include_router(wayfinder_router)
 
 # This is where we will host files that arise if the user specifies a filename
@@ -104,59 +106,6 @@ except RuntimeError:
             StaticFiles(directory=static_path),
             name='static',
         )
-
-
-@app.get('/', response_class=HTMLResponse)
-async def root(*, user_agent: Annotated[str | None, Header()] = None) -> Response:
-    """Root endpoint that displays the theHarvester logo and links to the GitHub repository.
-
-    Also performs basic user agent filtering to redirect suspicious bots.
-    """
-    if user_agent and ('gobuster' in user_agent or 'sqlmap' in user_agent or 'rustbuster' in user_agent):
-        return RedirectResponse(app.url_path_for('bot'))
-
-    return HTMLResponse(
-        """
-    <!DOCTYPE html>
-    <html lang="en-US">
-        <head>
-            <title>theHarvester API</title>
-             <style>
-              .img-container {
-                text-align: center;
-                display: block;
-                }
-              .api-links {
-                text-align: center;
-                margin-top: 20px;
-                font-family: Arial, sans-serif;
-              }
-              .api-links a {
-                margin: 0 10px;
-                text-decoration: none;
-                color: #0366d6;
-              }
-              .api-links a:hover {
-                text-decoration: underline;
-              }
-            </style>
-        </head>
-        <body>
-            <br/>
-            <a href="https://github.com/laramies/theHarvester" target="_blank">
-            <span class="img-container">
-                <img src="https://raw.githubusercontent.com/laramies/theHarvester/master/theHarvester-logo.webp" alt="theHarvester logo"/>
-            </span>
-            </a>
-            <div class="api-links">
-                <a href="/docs">API Documentation</a> |
-                <a href="/redoc">ReDoc Documentation</a> |
-                <a href="/sources">Available Sources</a>
-            </div>
-        </body>
-    </html>
-    """
-    )
 
 
 # Define Pydantic model for bot response
