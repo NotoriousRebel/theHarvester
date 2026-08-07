@@ -136,6 +136,7 @@ def test_rest_errors_are_visible_with_uvicorn_logging() -> None:
     result = run_python(
         """
         import logging.config
+        import os
         import sys
         from unittest.mock import AsyncMock, patch
 
@@ -147,11 +148,12 @@ def test_rest_errors_are_visible_with_uvicorn_logging() -> None:
         from theHarvester.lib.api import api
 
         client = TestClient(api.app)
+        os.environ['THEHARVESTER_API_KEY'] = 'operator-secret'
         statuses = []
         with patch.object(api.__main__.Core, 'get_supportedengines', side_effect=RuntimeError('sources failure')):
             statuses.append(client.get('/sources').status_code)
         with patch.object(api.__main__, 'start', AsyncMock(side_effect=RuntimeError('dnsbrute failure'))):
-            statuses.append(client.get('/dnsbrute?domain=example.com').status_code)
+            statuses.append(client.get('/dnsbrute?domain=example.com', headers={'X-API-Key': 'operator-secret'}).status_code)
         with (
             patch.object(api.__main__.Core, 'get_supportedengines', return_value=['baidu']),
             patch.object(api.__main__, 'start', AsyncMock(side_effect=RuntimeError('query failure'))),

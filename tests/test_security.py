@@ -1,7 +1,6 @@
 import os
 import re
 import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -38,9 +37,7 @@ class TestCORSConfiguration:
         allow_credentials = options.get('allow_credentials', False)
 
         if isinstance(allow_origins, (list, tuple, set)) and '*' in allow_origins:
-            assert (
-                allow_credentials is False
-            ), 'CRITICAL: CORS must not allow credentials with wildcard origins (CVE risk)'
+            assert allow_credentials is False, 'CRITICAL: CORS must not allow credentials with wildcard origins (CVE risk)'
 
     def test_cors_restricts_http_methods(self):
         """
@@ -68,9 +65,7 @@ class TestCORSConfiguration:
         if isinstance(allow_methods, list):
             dangerous_methods = {'DELETE', 'PUT', 'PATCH', 'TRACE', 'CONNECT'}
             allowed_set = {m.upper() for m in allow_methods}
-            assert not (
-                allowed_set & dangerous_methods
-            ), f'Unnecessary HTTP methods detected: {allowed_set & dangerous_methods}'
+            assert not (allowed_set & dangerous_methods), f'Unnecessary HTTP methods detected: {allowed_set & dangerous_methods}'
 
 
 class TestXMLInjectionPrevention:
@@ -167,8 +162,9 @@ class TestInformationDisclosure:
         """
         Security Test: Error messages should not reveal internal file paths.
         """
-        start = AsyncMock(return_value=([], [], [], [], [], [], [], [], []))
+        start = AsyncMock(return_value=([], [], [], [], [], [], [], [], [], []))
         fetch_all = AsyncMock(side_effect=AssertionError('API security test attempted a provider request'))
+        monkeypatch.setenv('THEHARVESTER_API_KEY', 'operator-secret')
         monkeypatch.setattr('theHarvester.lib.api.api.__main__.start', start)
         monkeypatch.setattr('theHarvester.lib.core.AsyncFetcher.fetch_all', fetch_all)
 
@@ -176,7 +172,7 @@ class TestInformationDisclosure:
         endpoints = ['/sources', '/dnsbrute?domain=test', '/query?domain=test&source=baidu']
 
         for endpoint in endpoints:
-            response = client.get(endpoint)
+            response = client.get(endpoint, headers={'X-API-Key': 'operator-secret'})
             response_text = str(response.json() if response.status_code != 200 else {})
 
             # Check for common path leakage patterns
@@ -224,10 +220,25 @@ class TestAdditionalAPIAuthentication:
 
     def test_additional_endpoints_fail_closed_without_configured_api_key(self, client, monkeypatch):
         monkeypatch.delenv('THEHARVESTER_API_KEY', raising=False)
+        monkeypatch.delenv('THEHARVESTER_API_KEY_FILE', raising=False)
 
         response = client.post('/additional/all', json={'domain': 'example.com'})
 
         assert response.status_code == 503
+
+    def test_api_key_can_be_read_from_a_docker_secret_file(self, client, tmp_path, monkeypatch):
+        secret = tmp_path / 'wayfinder-api-key'
+        secret.write_text('test-secret\n', encoding='utf-8')
+        monkeypatch.delenv('THEHARVESTER_API_KEY', raising=False)
+        monkeypatch.setenv('THEHARVESTER_API_KEY_FILE', str(secret))
+
+        response = client.post(
+            '/additional/all',
+            headers={'X-API-Key': 'test-secret'},
+            json={'domain': 'example.com'},
+        )
+
+        assert response.status_code != 401
 
     def test_additional_endpoints_reject_missing_or_invalid_api_key(self, client, monkeypatch):
         monkeypatch.setenv('THEHARVESTER_API_KEY', 'test-secret')
@@ -403,10 +414,7 @@ class TestSecurityBestPractices:
                     real_matches = [
                         m
                         for m in matches
-                        if 'example' not in m.lower()
-                        and 'your_' not in m.lower()
-                        and '""' not in m
-                        and "''" not in m
+                        if 'example' not in m.lower() and 'your_' not in m.lower() and '""' not in m and "''" not in m
                     ]
                     assert not real_matches, f'Potential hardcoded secret in {file_path}: {real_matches}'
 
@@ -437,11 +445,9 @@ class TestSecurityBestPractices:
             ('/dnsbrute?domain=a', 422),  # Too short domain should be rejected by FastAPI validation
         ]
 
-        for endpoint, expected_status in test_cases:
+        for endpoint, _expected_status in test_cases:
             response = client.get(endpoint)
-            assert (
-                response.status_code >= 400
-            ), f'Endpoint {endpoint} should reject invalid input (got {response.status_code})'
+            assert response.status_code >= 400, f'Endpoint {endpoint} should reject invalid input (got {response.status_code})'
 
         # Test query endpoint with proper parameter format but invalid domain
         response = client.get('/query?domain=a&source=baidu')  # Too short domain
