@@ -93,6 +93,32 @@ uv run restfulHarvest
 
 Open [http://127.0.0.1:5000/docs](http://127.0.0.1:5000/docs) for interactive Swagger documentation or [http://127.0.0.1:5000/redoc](http://127.0.0.1:5000/redoc) for ReDoc.
 
+For the single-user Wayfinder run desk, keep the key and runtime settings in an ignored `.env`, load it before starting the server, then open `/`. The server authenticates the local browser with an HttpOnly session cookie; the key is never entered into or stored by the web app.
+
+```bash
+set -a; source .env; set +a
+uv run restfulHarvest -H "${THEHARVESTER_HOST:-127.0.0.1}" -p "${THEHARVESTER_PORT:-8146}" --rate-limit "${THEHARVESTER_RATE_LIMIT:-1000/minute}"
+```
+
+### Docker and Wayfinder
+
+Docker Compose builds the pinned Python image, runs as an unprivileged user, stores Wayfinder data in a named volume, mounts the operator API key as a secret, and publishes only to localhost by default. Its local-proxy setting trusts only the detected Docker gateway while the browser uses a localhost URL; do not reuse that setting with a public port mapping.
+
+```bash
+install -d -m 0700 .secrets
+openssl rand -hex 32 > .secrets/wayfinder-api-key
+chmod 0600 .secrets/wayfinder-api-key
+docker compose up --build -d
+docker compose ps
+```
+
+Open `http://127.0.0.1:5000/`. The server authenticates the local browser automatically. Use only targets and activity classes you are authorized to test. The container includes Chromium for the optional screenshot workflow.
+
+```bash
+docker compose logs -f
+docker compose down
+```
+
 | Route | Purpose |
 | --- | --- |
 | `GET /sources` | List registered discovery sources. |
@@ -106,13 +132,9 @@ Open [http://127.0.0.1:5000/docs](http://127.0.0.1:5000/docs) for interactive Sw
 
 The service rate limit defaults to five requests per minute and can be changed with `--rate-limit`. The `/additional/*` routes require `THEHARVESTER_API_KEY` on the server and the same value in the `X-API-Key` request header.
 
-The core `/query`, `/sources`, and `/dnsbrute` routes do not normally require authentication. When a `/query` selection includes `dehashed`, `hibpverified`, or `leaklookup` and that source's provider key is configured, the request requires `THEHARVESTER_API_KEY` in the `X-API-Key` header because these sources can access breach-account data. Keep the service bound to localhost. If you require remote access, add authentication, access controls, and TLS.
+Passive `/query` and `/sources` requests do not normally require authentication. `/dnsbrute` and `/query` requests that select DNS interaction, direct interaction, or configured `dehashed`, `hibpverified`, or `leaklookup` access require `THEHARVESTER_API_KEY` in the `X-API-Key` header. Keep the service bound to localhost. If you require remote access, add authentication, access controls, and TLS.
 
-Docker Compose publishes port `5000` on every host interface unless you narrow the port mapping:
-
-```bash
-docker compose up --build
-```
+When `--proxies` and `--take-over` are combined, discovery sources still use configured proxies. Takeover checks bypass them so each validated public target address remains pinned for the request.
 
 ## Discovery sources
 
@@ -215,7 +237,7 @@ Never commit populated configuration files, API keys, account details, or provid
 - Screenshots are written to the directory passed to `--screenshot`.
 - Host, email, IP, and related scan records are stored in `~/.local/share/theHarvester/stash.sqlite`.
 - Full-pipeline runs are also stored transactionally by run UUID with their completed, deduplicated findings. Early REST returns and DNS-brute utility requests are not recorded as completed runs.
-- REST queries return JSON.
+- REST queries return JSON. Requests with post-collection actions preserve the legacy fields and add `run_id`, `status`, typed `results`, and `source_executions` terminal evidence.
 
 Treat collected OSINT as potentially sensitive. Keep report files, screenshots, and the local database out of source control and share them only within the authorized engagement.
 
@@ -237,7 +259,7 @@ The JSON report is a single object and is the more complete format for automatio
 
 The XML report contains the command, emails, hosts, and virtual hosts. Use JSON when you need the additional result types above.
 
-The JSONL report is finalized after the selected one-shot actions finish. Its first line is a summary with an independent run UUID, the target, UTC timestamps, counts, and schema version. Each remaining line is one deterministic, deduplicated string finding, including stable Have I Been Pwned breach names as `breach` records and normalized BuiltWith findings as `framework`, `language`, `server`, `cms`, or `analytics` records. Recursive runs add `dns-recursive-finding` values with hostname, parent, addresses, and PTR names; `dns-recursive-classification` values retain current and meaningful secondary candidates with hostname, parent, addressability, addresses, CNAMEs, and PTR names. One `dns-recursive-summary` value records query cost, reached depth, zero-yield batches, and stop reason. The format does not claim provider success or provider source attribution.
+The JSONL report is finalized after the selected one-shot actions finish. Its first line is a summary with an independent run UUID, the target, UTC timestamps, counts, and schema version. Each remaining line is one deterministic, deduplicated string finding, including stable Have I Been Pwned breach names as `breach` records and normalized BuiltWith findings as `framework`, `language`, `server`, `cms`, or `analytics` records. API scanning, screenshots, Shodan enrichment, and takeover checks add `api-endpoint`, `screenshot`, `shodan`, and `takeover` records. Recursive runs add `dns-recursive-finding` values with hostname, parent, addresses, and PTR names; `dns-recursive-classification` values retain current and meaningful secondary candidates with hostname, parent, addressability, addresses, CNAMEs, and PTR names. One `dns-recursive-summary` value records query cost, reached depth, zero-yield batches, and stop reason. The format does not claim provider success or provider source attribution.
 
 List every JSONL finding as tab-separated type and value columns:
 
