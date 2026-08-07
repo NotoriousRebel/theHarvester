@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 
 
-def test_orphan_recovery_reattaches_partial_checkpoint(tmp_path, monkeypatch) -> None:
+def test_orphan_recovery_reattaches_partial_checkpoint_and_leaves_queued_work(tmp_path, monkeypatch) -> None:
     from theHarvester.lib.api import wayfinder
     from theHarvester.lib.completed_result import CompletedResult
 
@@ -15,28 +15,35 @@ def test_orphan_recovery_reattaches_partial_checkpoint(tmp_path, monkeypatch) ->
 
     async def scenario():
         store = wayfinder.WayfinderStore()
-        created = await store.create(wayfinder.RunRequest(target='example.com', sources=['crtsh']))
-        claimed = await store.claim_next()
-        assert claimed is not None
-        artifact_dir = wayfinder._artifact_dir(created['run_id'])
+        for target in ('first.example', 'second.example', 'third.example'):
+            await store.create(wayfinder.RunRequest(target=target, sources=['crtsh']))
+        cancelling = await store.claim_next()
+        assert cancelling is not None
+        await store.cancel(cancelling['run_id'])
+        artifact_dir = wayfinder._artifact_dir(cancelling['run_id'])
         wayfinder._ensure_private_directory(artifact_dir)
         now = datetime.now(UTC)
         checkpoint = CompletedResult.finish(
-            target='example.com',
+            target='first.example',
             started_at=now,
             completed_at=now,
-            groups={'email': ['saved@example.com']},
+            groups={'email': ['saved@first.example']},
         )
         wayfinder._write_child_evidence(artifact_dir, checkpoint, partial=True)
+        running = await store.claim_next()
+        assert running is not None
         await store.recover_orphans()
-        return await store.get(created['run_id'])
+        return await store.get(cancelling['run_id']), await store.get(running['run_id']), await store.list_runs()
 
-    recovered = asyncio.run(scenario())
+    cancelling, running, history = asyncio.run(scenario())
 
-    assert recovered is not None
-    assert recovered['status'] == 'failed'
-    assert recovered['evidence_status'] == 'partial'
-    assert recovered['results'] == [{'type': 'email', 'value': 'saved@example.com', 'sources': []}]
+    assert cancelling is not None
+    assert cancelling['status'] == 'failed'
+    assert cancelling['evidence_status'] == 'partial'
+    assert cancelling['results'] == [{'type': 'email', 'value': 'saved@first.example', 'sources': []}]
+    assert running is not None
+    assert running['status'] == 'failed'
+    assert {run['target']: run['status'] for run in history}['third.example'] == 'queued'
 
 
 def test_worker_lease_serializes_execution_owners(tmp_path) -> None:
@@ -72,6 +79,8 @@ def test_submission_fails_closed_when_worker_supervisor_stops(tmp_path, monkeypa
             headers={'X-API-Key': 'test-key'},
             json={'target': 'example.com', 'sources': ['crtsh']},
         )
+        history = client.get('/api/wayfinder/runs', headers={'X-API-Key': 'test-key'})
 
     assert response.status_code == 503
     assert response.json()['detail'] == 'Wayfinder execution worker is unavailable'
+    assert history.json() == []

@@ -59,6 +59,7 @@ dev = [
     "types-ujson==5.10.0.20250822",
     "wheel==0.47.0",
     "ty==0.0.54",
+    "pytest-playwright==0.8.0",
 ]
 
 [project.scripts]
@@ -69,9 +70,10 @@ restfulHarvest = "theHarvester.restfulHarvest:main"
 minversion = "8.3.3"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--no-header --strict-markers"
+addopts = "--no-header --strict-markers -m 'not wayfinder_e2e' --tracing=retain-on-failure --screenshot=only-on-failure --video=retain-on-failure --output=test-results"
 markers = [
     "live_network: contacts an external service and runs only with --run-live-network",
+    "wayfinder_e2e: real-browser tests against an isolated local Wayfinder server",
 ]
 testpaths = ["tests"]
 

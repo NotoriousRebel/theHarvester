@@ -2,6 +2,7 @@
 *.pyc
 *.sqlite
 *.html
+!theHarvester/lib/api/static/wayfinder/index.html
 *.htm
 *.vscode
 *.xml
@@ -15,10 +16,15 @@ dist/
 theHarvester.egg-info
 api-keys.yaml
 .DS_Store
+.env
+.env.*
 .venv
 .venv/**
 .pyre
 .junie
+.secrets/
+docs/agents/
+test-results/
 
 # impeccable-ignore-start
 # Ephemeral output, runtime state, and per-dev overrides.
