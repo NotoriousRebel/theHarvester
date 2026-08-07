@@ -13,6 +13,22 @@ theHarvester is a Python OSINT reconnaissance tool for collecting public informa
 
 Read [CONTEXT.md](CONTEXT.md) when changing discovery terminology, evidence classification, scope handling, DNS validation, or P0/P1/P2 activity boundaries.
 
+<!-- fork-agent-skills-start -->
+## Agent skills
+
+### Issue tracker
+
+Issues, PRDs, plans, and agent-generated tickets live in `NotoriousRebel/theHarvester`. Upstream `laramies/theHarvester` is read-only unless the user explicitly authorizes a named mutation. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels on the fork: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. Read root `CONTEXT.md` and relevant records under `docs/adr/`. See `docs/agents/domain.md`.
+<!-- fork-agent-skills-end -->
+
 ## Code review rules
 
 - **External compatibility:** Flag changes that remove or rename CLI flags, output formats or fields, REST API response fields, or discovery source identifiers without a backward-compatible path and regression coverage. Preserve the existing contract or document and test the migration.
