@@ -6,12 +6,12 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Date, ForeignKey, Text, UniqueConstraint, event
+from sqlalchemy import Date, Float, ForeignKey, Text, UniqueConstraint, event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _sqlite_has_wal_reset_fix(version: tuple[int, int, int]) -> bool:
@@ -32,6 +32,11 @@ class DiscoveryObservationRecord(Base):
     __tablename__ = 'discovery_observations'
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey('completed_results.run_id', ondelete='CASCADE'),
+        index=True,
+    )
     domain: Mapped[str] = mapped_column(Text, index=True)
     resource: Mapped[str] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(Text, index=True)
@@ -64,6 +69,25 @@ class CompletedResultItemRecord(Base):
     position: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[str] = mapped_column(Text)
     value: Mapped[str] = mapped_column(Text)
+
+
+class SourceExecutionRecord(Base):
+    """The outcome of one passive source, including empty and failed attempts."""
+
+    __tablename__ = 'source_executions'
+
+    run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey('completed_results.run_id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text)
+    duration_ms: Mapped[float] = mapped_column(Float)
+    result_count: Mapped[int]
+    error_type: Mapped[str | None] = mapped_column(Text)
+    stop_reason: Mapped[str | None] = mapped_column(Text)
 
 
 def _configure_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:
@@ -121,6 +145,17 @@ class SQLiteDatabase:
                                 f'Database schema version {schema_version} is newer than supported version {SCHEMA_VERSION}'
                             )
                         await connection.run_sync(Base.metadata.create_all)
+                        observation_columns = await connection.exec_driver_sql(
+                            "SELECT name FROM pragma_table_info('discovery_observations')"
+                        )
+                        if 'run_id' not in observation_columns.scalars().all():
+                            await connection.exec_driver_sql(
+                                'ALTER TABLE discovery_observations ADD COLUMN run_id TEXT '
+                                'REFERENCES completed_results(run_id) ON DELETE CASCADE'
+                            )
+                        await connection.exec_driver_sql(
+                            'CREATE INDEX IF NOT EXISTS ix_discovery_observations_run_id ON discovery_observations (run_id)'
+                        )
                         legacy_table = await connection.exec_driver_sql(
                             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'results'"
                         )

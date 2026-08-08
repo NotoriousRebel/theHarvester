@@ -14,6 +14,7 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from typing import Any
+from uuid import uuid4
 
 import anyio
 import netaddr
@@ -83,7 +84,7 @@ from theHarvester.discovery import (
 )
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker, stash
-from theHarvester.lib.completed_result import CompletedResult, ResultKind, SourceExecution
+from theHarvester.lib.completed_result import CompletedResult, ExecutionStatus, ResultKind, ResultObservation, SourceExecution
 from theHarvester.lib.core import DATA_DIR, Core, show_default_error_message
 from theHarvester.lib.dns_consensus import AioDNSResolverVantage
 from theHarvester.lib.enumeration import (
@@ -336,6 +337,7 @@ async def start(
             # For relative paths, sanitize the entire filename
             filename = sanitize_filename(filename)
     run_started_at = datetime.now(UTC)
+    run_id = uuid4()
 
     all_emails: list = []
     all_hosts: list = []
@@ -431,6 +433,10 @@ async def start(
     interesting_urls = []
     total_asns = []
     source_executions: list[SourceExecution] = []
+    observations: set[ResultObservation] = set()
+
+    def record_source_observations(source: str, kind: ResultKind, values: Iterable[object]) -> None:
+        observations.update(ResultObservation(source, kind, value) for item in values if (value := str(item).strip()))
 
     def finish_completed_result(
         *, extra_hostnames: Iterable[str] = (), virtual_hosts: Iterable[str] = ()
@@ -520,11 +526,13 @@ async def start(
             groups['hostname'] = _normalize_hosts_for_storage((*all_hosts, *extra_hostnames), word)
         try:
             return CompletedResult.finish(
+                run_id=run_id,
                 target=word,
                 started_at=run_started_at,
                 completed_at=datetime.now(UTC),
                 groups=groups,
                 source_executions=source_executions,
+                observations=observations,
             )
         except (ValueError, TypeError) as error:
             output_logger.info(f'[!] An error occurred while completing the result: {error}')
@@ -548,7 +556,6 @@ async def start(
         """
         await search_engine.process(use_proxy)
         result_count = 0
-        db_stash = stash.StashManager()
         source = source_spec.name
         routes = source_spec.routes
 
@@ -591,19 +598,19 @@ async def start(
             else:
                 full.extend(host_names)
             all_hosts.extend(host_names)
-            await db_stash.store_all(word, host_names, 'hostname', source)
+            record_source_observations(source, 'hostname', host_names)
 
         if ResultRoute.EMAILS in routes:
             email_list = await search_engine.get_emails()
             result_count += len(email_list)
             all_emails.extend(email_list)
-            await db_stash.store_all(word, email_list, 'email', source)
+            record_source_observations(source, 'email', email_list)
 
         if ResultRoute.IPS in routes:
             ips_list = await search_engine.get_ips()
             result_count += len(ips_list)
             all_ip.extend(ips_list)
-            await db_stash.store_all(word, ips_list, 'ip-address', source)
+            record_source_observations(source, 'ip-address', _normalize_ip_addresses(ips_list))
 
         if ResultRoute.PEOPLE in routes:
             people_list = await search_engine.get_people()
@@ -612,41 +619,38 @@ async def start(
             people_evidence = (
                 json.dumps(person, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for person in people_list
             )
-            await db_stash.store_all(word, people_evidence, 'person', source)
+            record_source_observations(source, 'person', people_evidence)
 
         if ResultRoute.LINKS in routes:
             links = await search_engine.get_links()
             result_count += len(links)
             linkedin_links_tracker.extend(links)
-            if len(links) > 0:
-                await db.store_all(word, links, 'linkedin-link', source)
+            record_source_observations(source, 'linkedin-link', links)
 
         if ResultRoute.URLS in routes:
             urls = await search_engine.get_urls()
             result_count += len(urls)
             all_urls.extend(urls)
-            if len(urls) > 0:
-                await db_stash.store_all(word, urls, 'url', source)
+            record_source_observations(source, 'url', urls)
 
         if ResultRoute.INTERESTING_URLS in routes:
             get_interesting_urls = getattr(search_engine, 'get_interesting_urls', None)
             iurls = await get_interesting_urls() if get_interesting_urls else await search_engine.get_interestingurls()
             result_count += len(iurls)
             interesting_urls.extend(iurls)
-            if len(iurls) > 0:
-                await db.store_all(word, iurls, 'interesting-url', source)
+            record_source_observations(source, 'interesting-url', iurls)
 
         if ResultRoute.ASNS in routes:
             fasns = await search_engine.get_asns()
             result_count += len(fasns)
             total_asns.extend(fasns)
-            if len(fasns) > 0:
-                await db.store_all(word, fasns, 'asn', source)
+            record_source_observations(source, 'asn', fasns)
 
         if ResultRoute.BREACHES in routes:
             breach_names = await search_engine.get_breach_names()
             result_count += len(breach_names)
             all_breaches.extend(breach_names)
+            record_source_observations(source, 'breach', breach_names)
         if source == 'builtwith':
             technology_results: tuple[tuple[str, list[Any], ResultKind], ...] = (
                 ('get_frameworks', all_frameworks, 'framework'),
@@ -659,11 +663,16 @@ async def start(
                 values = await getattr(search_engine, getter_name)()
                 result_count += len(values)
                 results.extend(values)
-                await db_stash.store_all(word, values, result_type, source)
+                record_source_observations(source, result_type, values)
         if source == 'hudsonrock':
             infostealers = await search_engine.get_infostealers()
             result_count += len(infostealers)
             all_infostealers.extend(infostealers)
+            record_source_observations(
+                source,
+                'infostealer',
+                (json.dumps(stealer, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for stealer in infostealers),
+            )
 
         return result_count
 
@@ -681,12 +690,22 @@ async def start(
             )
             await checkpoint_completed_result()
             raise
+        reported_status = getattr(search_engine, 'execution_status', None)
+        stop_reason = getattr(search_engine, 'stop_reason', None)
+        execution_status: ExecutionStatus
+        if reported_status == 'rate-limited':
+            execution_status = 'rate-limited'
+        elif reported_status == 'partial':
+            execution_status = 'partial'
+        else:
+            execution_status = 'succeeded' if result_count else 'empty'
         source_executions.append(
             SourceExecution(
                 source_name,
-                'succeeded' if result_count else 'empty',
+                execution_status,
                 (time.perf_counter() - started) * 1000,
                 result_count,
+                stop_reason=stop_reason if isinstance(stop_reason, str) else None,
             )
         )
         await checkpoint_completed_result()

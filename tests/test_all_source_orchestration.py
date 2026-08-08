@@ -305,9 +305,10 @@ async def test_all_schedules_each_passive_catalog_source_once_and_reports_result
     assert 'user@example.test' in json_report['emails']
 
     jsonl_records = [json.loads(line) for line in report.with_suffix('.jsonl').read_text().splitlines()]
-    assert {'type': 'hostname', 'value': 'sub.example.test'} in jsonl_records
-    assert {'type': 'email', 'value': 'user@example.test'} in jsonl_records
-    assert {'type': 'url', 'value': 'https://gitlab.com/example/project'} in jsonl_records
+    findings = {(record['type'], record['value']): record for record in jsonl_records[1:]}
+    assert findings[('hostname', 'sub.example.test')]['sources']
+    assert findings[('email', 'user@example.test')]['sources']
+    assert findings[('url', 'https://gitlab.com/example/project')]['sources']
 
     completed = await TestStash().load_completed_result(UUID(jsonl_records[0]['run_id']))
     assert completed.target == 'example.test'

@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from theHarvester.lib.completed_result import CompletedResult
+from theHarvester.lib.completed_result import CompletedResult, ResultObservation, SourceExecution
 from theHarvester.lib.database import CompletedRunRecord, _sqlite_has_wal_reset_fix, sqlite_session
 from theHarvester.lib.stash import StashManager
 
@@ -38,6 +38,18 @@ CREATE TABLE results (
     find_date DATE,
     source TEXT
 );
+"""
+
+SCHEMA_V1_DISCOVERY_OBSERVATIONS = """
+CREATE TABLE discovery_observations (
+    id INTEGER NOT NULL PRIMARY KEY,
+    domain TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    discovered_on DATE NOT NULL,
+    source TEXT NOT NULL
+);
+PRAGMA user_version = 1;
 """
 
 
@@ -94,10 +106,10 @@ async def test_newer_schema_is_rejected_without_changing_journal_mode(tmp_path) 
     manager = StashManager()
     manager.db = str(tmp_path / 'stash.sqlite')
     with sqlite3.connect(manager.db) as db:
-        db.execute('PRAGMA user_version = 2')
+        db.execute('PRAGMA user_version = 3')
         original_journal_mode = db.execute('PRAGMA journal_mode').fetchone()[0]
 
-    with pytest.raises(RuntimeError, match='schema version 2 is newer than supported version 1'):
+    with pytest.raises(RuntimeError, match='schema version 3 is newer than supported version 2'):
         await manager.do_init()
 
     with sqlite3.connect(manager.db) as db:
@@ -180,6 +192,96 @@ async def test_completed_result_round_trip_preserves_discovery_observations(tmp_
 
 
 @pytest.mark.asyncio
+async def test_completed_result_round_trip_preserves_source_provenance(tmp_path) -> None:
+    manager = StashManager()
+    manager.db = str(tmp_path / 'stash.sqlite')
+    await manager.do_init()
+    result = CompletedResult.finish(
+        run_id=UUID('9c024fb7-4877-4f6e-89ef-0bf6af59ade0'),
+        target='example.com',
+        started_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 5, 12, 1, tzinfo=UTC),
+        groups={'hostname': ['api.example.com', 'mail.example.com']},
+        observations=(
+            ResultObservation('crtsh', 'hostname', 'api.example.com'),
+            ResultObservation('certspotter', 'hostname', 'api.example.com'),
+            ResultObservation('crtsh', 'hostname', 'mail.example.com'),
+        ),
+        source_executions=(
+            SourceExecution('crtsh', 'succeeded', 12.5, 2),
+            SourceExecution('certspotter', 'succeeded', 8.0, 1),
+        ),
+    )
+
+    await manager.store_completed_result(result)
+
+    assert await manager.load_completed_result(result.run_id) == result
+    with sqlite3.connect(manager.db) as db:
+        observations = db.execute(
+            'SELECT run_id, source, kind, resource FROM discovery_observations ORDER BY source, resource'
+        ).fetchall()
+        executions = db.execute('SELECT run_id, source, status, result_count FROM source_executions ORDER BY position').fetchall()
+    assert observations == [
+        (str(result.run_id), 'certspotter', 'hostname', 'api.example.com'),
+        (str(result.run_id), 'crtsh', 'hostname', 'api.example.com'),
+        (str(result.run_id), 'crtsh', 'hostname', 'mail.example.com'),
+    ]
+    assert executions == [
+        (str(result.run_id), 'crtsh', 'succeeded', 2),
+        (str(result.run_id), 'certspotter', 'succeeded', 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_yields_distinguish_unique_and_shared_results(tmp_path) -> None:
+    manager = StashManager()
+    manager.db = str(tmp_path / 'stash.sqlite')
+    await manager.do_init()
+    result = CompletedResult.finish(
+        run_id=UUID('bb2e9a76-f7fc-4eec-acbc-6da55a389d88'),
+        target='example.com',
+        started_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 5, 12, 1, tzinfo=UTC),
+        groups={'hostname': ['api.example.com', 'mail.example.com', 'www.example.com']},
+        observations=(
+            ResultObservation('crtsh', 'hostname', 'api.example.com'),
+            ResultObservation('certspotter', 'hostname', 'api.example.com'),
+            ResultObservation('crtsh', 'hostname', 'mail.example.com'),
+            ResultObservation('certspotter', 'hostname', 'www.example.com'),
+        ),
+        source_executions=(
+            SourceExecution('crtsh', 'succeeded', 12.5, 2),
+            SourceExecution('certspotter', 'succeeded', 8.0, 2),
+            SourceExecution('empty-source', 'empty', 5.0, 0),
+        ),
+    )
+    await manager.store_completed_result(result)
+
+    yields = await manager.source_yields(result.run_id)
+
+    assert [item.to_dict() for item in yields] == [
+        {
+            'source': 'certspotter',
+            'observed_result_count': 2,
+            'unique_result_count': 1,
+            'shared_result_count': 1,
+        },
+        {
+            'source': 'crtsh',
+            'observed_result_count': 2,
+            'unique_result_count': 1,
+            'shared_result_count': 1,
+        },
+        {
+            'source': 'empty-source',
+            'observed_result_count': 0,
+            'unique_result_count': 0,
+            'shared_result_count': 0,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_existing_completed_records_survive_initialization(tmp_path) -> None:
     manager = StashManager()
     manager.db = str(tmp_path / 'stash.sqlite')
@@ -236,7 +338,7 @@ async def test_released_results_migrate_to_discovery_observations(tmp_path) -> N
         ('/api/v1', 'api-endpoint'),
         ('admin@example.com', 'email'),
     ]
-    assert schema_version == 1
+    assert schema_version == 2
 
 
 @pytest.mark.asyncio
@@ -309,7 +411,7 @@ async def test_discovery_observations_use_the_normalized_schema(tmp_path) -> Non
         columns = [row[1] for row in db.execute('PRAGMA table_info(discovery_observations)')]
         rows = db.execute('SELECT domain, resource, kind, source FROM discovery_observations ORDER BY id').fetchall()
 
-    assert columns == ['id', 'domain', 'resource', 'kind', 'discovered_on', 'source']
+    assert columns == ['id', 'run_id', 'domain', 'resource', 'kind', 'discovered_on', 'source']
     assert rows == [
         ('example.com', 'api.example.com', 'hostname', 'crtsh'),
         ('example.com', 'www.example.com', 'hostname', 'crtsh'),
@@ -319,6 +421,28 @@ async def test_discovery_observations_use_the_normalized_schema(tmp_path) -> Non
         ('example.com', 'vhost.example.com', 'vhost', 'virtual-host'),
         ('example.com', '443', 'shodan', 'shodan'),
     ]
+
+
+@pytest.mark.asyncio
+async def test_schema_v1_observations_upgrade_without_losing_rows(tmp_path) -> None:
+    manager = StashManager()
+    manager.db = str(tmp_path / 'stash.sqlite')
+    with sqlite3.connect(manager.db) as db:
+        db.executescript(SCHEMA_V1_DISCOVERY_OBSERVATIONS)
+        db.execute(
+            'INSERT INTO discovery_observations (domain, resource, kind, discovered_on, source) VALUES (?, ?, ?, ?, ?)',
+            ('example.com', 'api.example.com', 'hostname', '2026-08-08', 'crtsh'),
+        )
+
+    await manager.do_init()
+
+    with sqlite3.connect(manager.db) as db:
+        rows = db.execute('SELECT run_id, domain, resource, kind, source FROM discovery_observations').fetchall()
+        schema_version = db.execute('PRAGMA user_version').fetchone()[0]
+        indexes = {row[1] for row in db.execute('PRAGMA index_list(discovery_observations)')}
+    assert rows == [(None, 'example.com', 'api.example.com', 'hostname', 'crtsh')]
+    assert schema_version == 2
+    assert 'ix_discovery_observations_run_id' in indexes
 
 
 @pytest.mark.asyncio
