@@ -9,7 +9,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from theHarvester.lib.completed_result import CompletedResult, ResultObservation, SourceExecution
+from theHarvester.lib.completed_result import (
+    ActionExecution,
+    ActionObservation,
+    ArtifactReference,
+    CompletedResult,
+    ResultObservation,
+    SourceExecution,
+)
 from theHarvester.lib.database import CompletedRunRecord, _sqlite_has_wal_reset_fix, sqlite_session
 from theHarvester.lib.stash import StashManager
 
@@ -50,6 +57,44 @@ CREATE TABLE discovery_observations (
     source TEXT NOT NULL
 );
 PRAGMA user_version = 1;
+"""
+
+SCHEMA_V2_RUN_PROVENANCE = """
+CREATE TABLE completed_results (
+    run_id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL
+);
+CREATE TABLE completed_result_items (
+    run_id TEXT NOT NULL REFERENCES completed_results(run_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (run_id, position),
+    UNIQUE (run_id, kind, value)
+);
+CREATE TABLE discovery_observations (
+    id INTEGER NOT NULL PRIMARY KEY,
+    run_id TEXT REFERENCES completed_results(run_id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    discovered_on DATE NOT NULL,
+    source TEXT NOT NULL
+);
+CREATE TABLE source_executions (
+    run_id TEXT NOT NULL REFERENCES completed_results(run_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_ms FLOAT NOT NULL,
+    result_count INTEGER NOT NULL,
+    error_type TEXT,
+    stop_reason TEXT,
+    PRIMARY KEY (run_id, position)
+);
+PRAGMA user_version = 2;
 """
 
 
@@ -106,10 +151,10 @@ async def test_newer_schema_is_rejected_without_changing_journal_mode(tmp_path) 
     manager = StashManager()
     manager.db = str(tmp_path / 'stash.sqlite')
     with sqlite3.connect(manager.db) as db:
-        db.execute('PRAGMA user_version = 3')
+        db.execute('PRAGMA user_version = 4')
         original_journal_mode = db.execute('PRAGMA journal_mode').fetchone()[0]
 
-    with pytest.raises(RuntimeError, match='schema version 3 is newer than supported version 2'):
+    with pytest.raises(RuntimeError, match='schema version 4 is newer than supported version 3'):
         await manager.do_init()
 
     with sqlite3.connect(manager.db) as db:
@@ -282,6 +327,102 @@ async def test_source_yields_distinguish_unique_and_shared_results(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_completed_result_round_trip_preserves_action_evidence_and_yields(tmp_path) -> None:
+    manager = StashManager()
+    manager.db = str(tmp_path / 'stash.sqlite')
+    await manager.do_init()
+    screenshot_value = 'https://api.example.com'
+    result = CompletedResult.finish(
+        run_id=UUID('d721f4c5-1c76-4e7a-904a-23c5d6755834'),
+        target='example.com',
+        started_at=datetime(2026, 8, 8, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 8, 12, 1, tzinfo=UTC),
+        groups={
+            'hostname': ['api.example.com'],
+            'ip-address': ['192.0.2.10'],
+            'screenshot': [screenshot_value],
+        },
+        action_executions=(
+            ActionExecution('dns-brute', 'succeeded', 12.5, 2),
+            ActionExecution('dns-recursive', 'succeeded', 8.0, 1),
+            ActionExecution('screenshot', 'succeeded', 4.0, 1),
+            ActionExecution('takeover', 'empty', 2.0, 0),
+        ),
+        action_observations=(
+            ActionObservation('dns-brute', 'hostname', 'api.example.com'),
+            ActionObservation('dns-brute', 'ip-address', '192.0.2.10'),
+            ActionObservation('dns-recursive', 'hostname', 'api.example.com'),
+            ActionObservation('screenshot', 'screenshot', screenshot_value),
+        ),
+        artifacts=(
+            ArtifactReference(
+                action='screenshot',
+                result_kind='screenshot',
+                result_value=screenshot_value,
+                path='/tmp/screenshots/api.example.com.png',
+                media_type='image/png',
+                size_bytes=3,
+                sha256='0' * 64,
+            ),
+        ),
+    )
+
+    await manager.store_completed_result(result)
+
+    assert await manager.load_completed_result(result.run_id) == result
+    assert [item.to_dict() for item in await manager.action_yields(result.run_id)] == [
+        {
+            'action': 'dns-brute',
+            'observed_result_count': 2,
+            'unique_result_count': 1,
+            'shared_result_count': 1,
+        },
+        {
+            'action': 'dns-recursive',
+            'observed_result_count': 1,
+            'unique_result_count': 0,
+            'shared_result_count': 1,
+        },
+        {
+            'action': 'screenshot',
+            'observed_result_count': 1,
+            'unique_result_count': 1,
+            'shared_result_count': 0,
+        },
+        {
+            'action': 'takeover',
+            'observed_result_count': 0,
+            'unique_result_count': 0,
+            'shared_result_count': 0,
+        },
+    ]
+    with sqlite3.connect(manager.db) as db:
+        action_observations = db.execute(
+            'SELECT action, kind, resource FROM action_observations ORDER BY action, kind'
+        ).fetchall()
+        artifacts = db.execute(
+            'SELECT action, result_kind, result_value, path, media_type, size_bytes, sha256 FROM run_artifacts'
+        ).fetchall()
+    assert action_observations == [
+        ('dns-brute', 'hostname', 'api.example.com'),
+        ('dns-brute', 'ip-address', '192.0.2.10'),
+        ('dns-recursive', 'hostname', 'api.example.com'),
+        ('screenshot', 'screenshot', screenshot_value),
+    ]
+    assert artifacts == [
+        (
+            'screenshot',
+            'screenshot',
+            screenshot_value,
+            '/tmp/screenshots/api.example.com.png',
+            'image/png',
+            3,
+            '0' * 64,
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_existing_completed_records_survive_initialization(tmp_path) -> None:
     manager = StashManager()
     manager.db = str(tmp_path / 'stash.sqlite')
@@ -338,7 +479,7 @@ async def test_released_results_migrate_to_discovery_observations(tmp_path) -> N
         ('/api/v1', 'api-endpoint'),
         ('admin@example.com', 'email'),
     ]
-    assert schema_version == 2
+    assert schema_version == 3
 
 
 @pytest.mark.asyncio
@@ -441,8 +582,53 @@ async def test_schema_v1_observations_upgrade_without_losing_rows(tmp_path) -> N
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
         indexes = {row[1] for row in db.execute('PRAGMA index_list(discovery_observations)')}
     assert rows == [(None, 'example.com', 'api.example.com', 'hostname', 'crtsh')]
-    assert schema_version == 2
+    assert schema_version == 3
     assert 'ix_discovery_observations_run_id' in indexes
+
+
+@pytest.mark.asyncio
+async def test_schema_v2_run_provenance_upgrades_without_losing_rows(tmp_path) -> None:
+    manager = StashManager()
+    manager.db = str(tmp_path / 'stash.sqlite')
+    run_id = '251d4047-190b-4a4d-9c4e-9eed3f23c8c7'
+    with sqlite3.connect(manager.db) as db:
+        db.executescript(SCHEMA_V2_RUN_PROVENANCE)
+        db.execute(
+            'INSERT INTO completed_results (run_id, target, started_at, completed_at) VALUES (?, ?, ?, ?)',
+            (run_id, 'example.com', '2026-08-08T12:00:00+00:00', '2026-08-08T12:01:00+00:00'),
+        )
+        db.execute(
+            'INSERT INTO completed_result_items (run_id, position, kind, value) VALUES (?, ?, ?, ?)',
+            (run_id, 0, 'hostname', 'api.example.com'),
+        )
+        db.execute(
+            'INSERT INTO discovery_observations '
+            '(run_id, domain, resource, kind, discovered_on, source) VALUES (?, ?, ?, ?, ?, ?)',
+            (run_id, 'example.com', 'api.example.com', 'hostname', '2026-08-08', 'crtsh'),
+        )
+        db.execute(
+            'INSERT INTO source_executions '
+            '(run_id, position, source, status, duration_ms, result_count) VALUES (?, ?, ?, ?, ?, ?)',
+            (run_id, 0, 'crtsh', 'succeeded', 12.5, 1),
+        )
+
+    await manager.do_init()
+
+    with sqlite3.connect(manager.db) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        item = db.execute('SELECT kind, value FROM completed_result_items WHERE run_id = ?', (run_id,)).fetchone()
+        observation = db.execute(
+            'SELECT source, kind, resource FROM discovery_observations WHERE run_id = ?', (run_id,)
+        ).fetchone()
+        execution = db.execute(
+            'SELECT source, status, duration_ms, result_count FROM source_executions WHERE run_id = ?', (run_id,)
+        ).fetchone()
+        schema_version = db.execute('PRAGMA user_version').fetchone()[0]
+    assert {'action_executions', 'action_observations', 'run_artifacts'} <= tables
+    assert item == ('hostname', 'api.example.com')
+    assert observation == ('crtsh', 'hostname', 'api.example.com')
+    assert execution == ('crtsh', 'succeeded', 12.5, 1)
+    assert schema_version == 3
 
 
 @pytest.mark.asyncio

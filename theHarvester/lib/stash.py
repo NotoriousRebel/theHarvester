@@ -9,6 +9,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 
 from theHarvester.lib.completed_result import (
+    ActionExecution,
+    ActionObservation,
+    ActionYield,
+    ArtifactReference,
     CompletedResult,
     ExecutionStatus,
     ResultKind,
@@ -17,9 +21,12 @@ from theHarvester.lib.completed_result import (
     SourceYield,
 )
 from theHarvester.lib.database import (
+    ActionExecutionRecord,
+    ActionObservationRecord,
     CompletedResultItemRecord,
     CompletedRunRecord,
     DiscoveryObservationRecord,
+    RunArtifactRecord,
     SourceExecutionRecord,
     initialize_stash_schema,
     sqlite_session,
@@ -81,6 +88,42 @@ class StashManager:
                 )
                 for observation in result.observations
             )
+            session.add_all(
+                ActionExecutionRecord(
+                    run_id=run_id,
+                    position=position,
+                    action=execution.action,
+                    status=execution.status,
+                    duration_ms=execution.duration_ms,
+                    result_count=execution.result_count,
+                    error_type=execution.error_type,
+                    stop_reason=execution.stop_reason,
+                )
+                for position, execution in enumerate(result.action_executions)
+            )
+            session.add_all(
+                ActionObservationRecord(
+                    run_id=run_id,
+                    action=observation.action,
+                    kind=observation.kind,
+                    resource=observation.value,
+                )
+                for observation in result.action_observations
+            )
+            session.add_all(
+                RunArtifactRecord(
+                    run_id=run_id,
+                    position=position,
+                    action=artifact.action,
+                    result_kind=artifact.result_kind,
+                    result_value=artifact.result_value,
+                    path=artifact.path,
+                    media_type=artifact.media_type,
+                    size_bytes=artifact.size_bytes,
+                    sha256=artifact.sha256,
+                )
+                for position, artifact in enumerate(result.artifacts)
+            )
             await session.commit()
 
     async def load_completed_result(self, run_id: UUID) -> CompletedResult:
@@ -113,6 +156,25 @@ class StashManager:
                     )
                 )
             ).all()
+            action_execution_rows = (
+                await session.scalars(
+                    select(ActionExecutionRecord)
+                    .where(ActionExecutionRecord.run_id == str(run_id))
+                    .order_by(ActionExecutionRecord.position)
+                )
+            ).all()
+            action_observation_rows = (
+                await session.scalars(
+                    select(ActionObservationRecord)
+                    .where(ActionObservationRecord.run_id == str(run_id))
+                    .order_by(ActionObservationRecord.action, ActionObservationRecord.kind, ActionObservationRecord.resource)
+                )
+            ).all()
+            artifact_rows = (
+                await session.scalars(
+                    select(RunArtifactRecord).where(RunArtifactRecord.run_id == str(run_id)).order_by(RunArtifactRecord.position)
+                )
+            ).all()
         return CompletedResult(
             run_id=UUID(parent.run_id),
             target=parent.target,
@@ -132,6 +194,32 @@ class StashManager:
             ),
             observations=tuple(
                 ResultObservation(row.source, cast('ResultKind', row.kind), row.resource) for row in observation_rows
+            ),
+            action_executions=tuple(
+                ActionExecution(
+                    action=row.action,
+                    status=cast('ExecutionStatus', row.status),
+                    duration_ms=row.duration_ms,
+                    result_count=row.result_count,
+                    error_type=row.error_type,
+                    stop_reason=row.stop_reason,
+                )
+                for row in action_execution_rows
+            ),
+            action_observations=tuple(
+                ActionObservation(row.action, cast('ResultKind', row.kind), row.resource) for row in action_observation_rows
+            ),
+            artifacts=tuple(
+                ArtifactReference(
+                    action=row.action,
+                    result_kind=cast('ResultKind', row.result_kind),
+                    result_value=row.result_value,
+                    path=row.path,
+                    media_type=row.media_type,
+                    size_bytes=row.size_bytes,
+                    sha256=row.sha256,
+                )
+                for row in artifact_rows
             ),
         )
 
@@ -177,16 +265,7 @@ class StashManager:
             executed_sources = set(
                 await session.scalars(select(SourceExecutionRecord.source).where(SourceExecutionRecord.run_id == str(run_id)))
             )
-        sources_by_result: dict[tuple[str, str], set[str]] = {}
-        for source, kind, value in rows:
-            sources_by_result.setdefault((kind, value), set()).add(source)
-        observed_counts: Counter[str] = Counter()
-        unique_counts: Counter[str] = Counter()
-        shared_counts: Counter[str] = Counter()
-        for sources in sources_by_result.values():
-            for source in sources:
-                observed_counts[source] += 1
-                (unique_counts if len(sources) == 1 else shared_counts)[source] += 1
+        observed_counts, unique_counts, shared_counts = self._yield_counts((row[0], row[1], row[2]) for row in rows)
         return [
             SourceYield(
                 source=source,
@@ -196,6 +275,45 @@ class StashManager:
             )
             for source in sorted(executed_sources | observed_counts.keys())
         ]
+
+    async def action_yields(self, run_id: UUID) -> list[ActionYield]:
+        async with sqlite_session(self.db) as session:
+            rows = (
+                await session.execute(
+                    select(
+                        ActionObservationRecord.action,
+                        ActionObservationRecord.kind,
+                        ActionObservationRecord.resource,
+                    ).where(ActionObservationRecord.run_id == str(run_id))
+                )
+            ).all()
+            executed_actions = set(
+                await session.scalars(select(ActionExecutionRecord.action).where(ActionExecutionRecord.run_id == str(run_id)))
+            )
+        observed_counts, unique_counts, shared_counts = self._yield_counts((row[0], row[1], row[2]) for row in rows)
+        return [
+            ActionYield(
+                action=action,
+                observed_result_count=observed_counts[action],
+                unique_result_count=unique_counts[action],
+                shared_result_count=shared_counts[action],
+            )
+            for action in sorted(executed_actions | observed_counts.keys())
+        ]
+
+    @staticmethod
+    def _yield_counts(rows: Iterable[tuple[str, str, str]]) -> tuple[Counter[str], Counter[str], Counter[str]]:
+        producers_by_result: dict[tuple[str, str], set[str]] = {}
+        for producer, kind, value in rows:
+            producers_by_result.setdefault((kind, value), set()).add(producer)
+        observed_counts: Counter[str] = Counter()
+        unique_counts: Counter[str] = Counter()
+        shared_counts: Counter[str] = Counter()
+        for producers in producers_by_result.values():
+            for producer in producers:
+                observed_counts[producer] += 1
+                (unique_counts if len(producers) == 1 else shared_counts)[producer] += 1
+        return observed_counts, unique_counts, shared_counts
 
     async def store(self, domain: str, resource: str, res_type: ResultKind, source: str) -> None:
         try:

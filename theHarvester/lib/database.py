@@ -11,7 +11,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _sqlite_has_wal_reset_fix(version: tuple[int, int, int]) -> bool:
@@ -88,6 +88,61 @@ class SourceExecutionRecord(Base):
     result_count: Mapped[int]
     error_type: Mapped[str | None] = mapped_column(Text)
     stop_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class ActionExecutionRecord(Base):
+    """The outcome of one operator-selected active action."""
+
+    __tablename__ = 'action_executions'
+
+    run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey('completed_results.run_id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    action: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text)
+    duration_ms: Mapped[float] = mapped_column(Float)
+    result_count: Mapped[int]
+    error_type: Mapped[str | None] = mapped_column(Text)
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class ActionObservationRecord(Base):
+    """A normalized finding produced by an active action."""
+
+    __tablename__ = 'action_observations'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey('completed_results.run_id', ondelete='CASCADE'),
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(Text, index=True)
+    kind: Mapped[str] = mapped_column(Text, index=True)
+    resource: Mapped[str] = mapped_column(Text)
+
+
+class RunArtifactRecord(Base):
+    """Metadata for an action output file; the file itself remains on disk."""
+
+    __tablename__ = 'run_artifacts'
+
+    run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey('completed_results.run_id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    action: Mapped[str] = mapped_column(Text)
+    result_kind: Mapped[str] = mapped_column(Text)
+    result_value: Mapped[str] = mapped_column(Text)
+    path: Mapped[str] = mapped_column(Text)
+    media_type: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int]
+    sha256: Mapped[str] = mapped_column(Text)
 
 
 def _configure_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:

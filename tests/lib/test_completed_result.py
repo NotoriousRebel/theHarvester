@@ -5,7 +5,14 @@ from uuid import UUID
 
 import pytest
 
-from theHarvester.lib.completed_result import CompletedResult, ResultObservation, SourceExecution
+from theHarvester.lib.completed_result import (
+    ActionExecution,
+    ActionObservation,
+    ArtifactReference,
+    CompletedResult,
+    ResultObservation,
+    SourceExecution,
+)
 
 
 def test_completed_result_is_deterministic_and_deduplicated() -> None:
@@ -24,26 +31,32 @@ def test_completed_result_is_deterministic_and_deduplicated() -> None:
 
     assert records == [
         {
+            'action_executions': [],
+            'artifacts': [],
             'completed_at': '2026-08-05T12:01:00Z',
             'counts': {'email': 1, 'hostname': 2},
             'result_count': 3,
             'run_id': 'f047261c-0afb-4e18-89d5-28a7d977f51f',
             'schema_version': 'theharvester-results-v1',
+            'source_executions': [],
             'started_at': '2026-08-05T12:00:00Z',
             'target': 'example.com',
             'type': 'summary',
         },
         {
+            'actions': [],
             'sources': [],
             'type': 'email',
             'value': 'admin@example.com',
         },
         {
+            'actions': [],
             'sources': [],
             'type': 'hostname',
             'value': 'api.example.com',
         },
         {
+            'actions': [],
             'sources': [],
             'type': 'hostname',
             'value': 'www.example.com',
@@ -88,6 +101,93 @@ def test_completed_result_exposes_truthful_source_execution_evidence() -> None:
     ]
 
 
+def test_completed_result_exposes_action_attribution_and_artifacts() -> None:
+    started_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    screenshot_value = 'https://api.example.com'
+    result = CompletedResult.finish(
+        target='example.com',
+        started_at=started_at,
+        completed_at=started_at,
+        groups={
+            'hostname': ['api.example.com'],
+            'ip-address': ['192.0.2.10'],
+            'screenshot': [screenshot_value],
+        },
+        action_executions=(
+            ActionExecution('dns-resolve', 'succeeded', 10.0, 2),
+            ActionExecution('screenshot', 'succeeded', 20.0, 1),
+        ),
+        action_observations=(
+            ActionObservation('dns-resolve', 'hostname', 'api.example.com'),
+            ActionObservation('dns-resolve', 'ip-address', '192.0.2.10'),
+            ActionObservation('screenshot', 'screenshot', screenshot_value),
+        ),
+        artifacts=(
+            ArtifactReference(
+                action='screenshot',
+                result_kind='screenshot',
+                result_value=screenshot_value,
+                path='/tmp/screenshots/api.example.com.png',
+                media_type='image/png',
+                size_bytes=3,
+                sha256='0' * 64,
+            ),
+        ),
+    )
+
+    records = [json.loads(line) for line in result.jsonl().splitlines()]
+
+    assert records[0]['action_executions'] == [
+        {
+            'action': 'dns-resolve',
+            'duration_ms': 10.0,
+            'error_type': None,
+            'result_count': 2,
+            'status': 'succeeded',
+            'stop_reason': None,
+        },
+        {
+            'action': 'screenshot',
+            'duration_ms': 20.0,
+            'error_type': None,
+            'result_count': 1,
+            'status': 'succeeded',
+            'stop_reason': None,
+        },
+    ]
+    assert records[0]['artifacts'] == [
+        {
+            'action': 'screenshot',
+            'media_type': 'image/png',
+            'path': '/tmp/screenshots/api.example.com.png',
+            'result_kind': 'screenshot',
+            'result_value': screenshot_value,
+            'sha256': '0' * 64,
+            'size_bytes': 3,
+        }
+    ]
+    findings = {(record['type'], record['value']): record for record in records[1:]}
+    assert findings[('hostname', 'api.example.com')]['actions'] == ['dns-resolve']
+    assert findings[('ip-address', '192.0.2.10')]['actions'] == ['dns-resolve']
+    assert findings[('screenshot', screenshot_value)]['actions'] == ['screenshot']
+    assert result.evidence_dict()['action_executions'] == records[0]['action_executions']
+    assert result.evidence_dict()['artifacts'] == records[0]['artifacts']
+
+
+def test_action_failures_make_completed_evidence_partial() -> None:
+    started_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    result = CompletedResult.finish(
+        target='example.com',
+        started_at=started_at,
+        completed_at=started_at,
+        groups={'hostname': ['api.example.com']},
+        source_executions=(SourceExecution('crtsh', 'succeeded', 1.0, 1),),
+        action_executions=(ActionExecution('screenshot', 'failed', 2.0, 0, 'TimeoutError'),),
+    )
+
+    assert result.evidence_dict()['status'] == 'partial'
+
+
 def test_completed_result_attributes_each_finding_to_its_sources() -> None:
     completed_at = datetime(2026, 8, 5, 12, 1, tzinfo=UTC)
     result = CompletedResult.finish(
@@ -106,11 +206,13 @@ def test_completed_result_attributes_each_finding_to_its_sources() -> None:
 
     assert records[1:] == [
         {
+            'actions': [],
             'sources': ['certspotter', 'crtsh'],
             'type': 'hostname',
             'value': 'api.example.com',
         },
         {
+            'actions': [],
             'sources': ['crtsh'],
             'type': 'hostname',
             'value': 'mail.example.com',
