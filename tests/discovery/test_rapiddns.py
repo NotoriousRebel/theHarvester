@@ -235,7 +235,7 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
         await theharvester_main.start(completed_result_checkpoint=capture_checkpoint)
 
     assert exit_info.value.code == 0
-    assert stored.count(('api-endpoint', ('/health',), 'api_scan')) == 1
+    assert stored == []
 
     report_json = json.loads(report.with_suffix('.json').read_text())
     assert report_json['hosts'] == ['alias.example.com', 'api.example.com', 'broken.example.com']
@@ -253,10 +253,20 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
         'type': 'interesting-url',
         'value': 'https://example.com/health',
         'sources': [],
-        'actions': [],
+        'actions': ['api-scan'],
     } in jsonl_records
-    assert {'type': 'url', 'value': 'https://example.com/health', 'sources': [], 'actions': []} in jsonl_records
-    assert {'type': 'hostname', 'value': 'reverse.example.com', 'sources': [], 'actions': []} in jsonl_records
+    assert {
+        'type': 'url',
+        'value': 'https://example.com/health',
+        'sources': [],
+        'actions': ['api-scan'],
+    } in jsonl_records
+    assert {
+        'type': 'hostname',
+        'value': 'reverse.example.com',
+        'sources': [],
+        'actions': ['dns-reverse'],
+    } in jsonl_records
     assert {
         'type': 'ip-address',
         'value': '198.51.100.9',
@@ -270,10 +280,7 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
         'actions': [],
     } in jsonl_records
     assert not any(record.get('value') == 'not-an-ip' for record in jsonl_records)
-    assert {
-        (observation.source, observation.kind, observation.value)
-        for observation in completed_results[0].observations
-    } >= {
+    assert {(observation.source, observation.kind, observation.value) for observation in completed_results[0].observations} >= {
         ('rapiddns', 'hostname', 'api.example.com'),
         ('rapiddns', 'ip-address', '192.0.2.1'),
         ('securityscorecard', 'ip-address', '198.51.100.9'),
@@ -343,10 +350,7 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
     assert completed_results[1].target == 'example.com'
     assert {'192.0.2.1', '198.51.100.2'} <= {value for kind, value in completed_results[1].results if kind == 'ip-address'}
     assert ('email', 'user@example.com') in completed_results[1].results
-    assert {
-        (observation.source, observation.kind, observation.value)
-        for observation in completed_results[1].observations
-    } >= {
+    assert {(observation.source, observation.kind, observation.value) for observation in completed_results[1].observations} >= {
         ('dehashed', 'email', 'user@example.com'),
         ('dehashed', 'ip-address', '198.51.100.2'),
         ('rapiddns', 'hostname', 'api.example.com'),

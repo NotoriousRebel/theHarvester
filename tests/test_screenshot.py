@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import stat
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -85,9 +86,18 @@ async def test_take_screenshot_preserves_www_hostname(
     monkeypatch.setattr(screenshot_module, 'async_playwright', MagicMock(return_value=manager))
     monkeypatch.setattr(screenshot_module.os, 'chmod', MagicMock())
 
-    captured_url = await ScreenShotter(str(tmp_path)).take_screenshot('www.example.com')
+    async def write_screenshot(*, path: str) -> None:
+        Path(path).write_bytes(b'png')  # noqa: ASYNC240 - tiny in-memory browser fixture
 
-    assert captured_url == 'https://www.example.com'
+    page.screenshot.side_effect = write_screenshot
+
+    capture = await ScreenShotter(str(tmp_path)).take_screenshot('www.example.com')
+
+    assert capture is not None
+    assert capture.url == 'https://www.example.com'
+    assert capture.path == str(tmp_path / 'www.example.com.png')
+    assert capture.size_bytes == 3
+    assert capture.sha256 == hashlib.sha256(b'png').hexdigest()
     page.goto.assert_awaited_once_with('https://www.example.com', timeout=35000)
     screenshot_path = page.screenshot.await_args.kwargs['path']
     assert screenshot_path.endswith('www.example.com.png')

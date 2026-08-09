@@ -118,7 +118,7 @@ docker compose up --build
 
 The table shows which result types each source can add to consolidated CLI results. Legacy JSON and XML keep their existing schemas; breach names are retained in JSONL and SQLite. Some adapters parse fields that the reports do not store.
 
-The report groups findings by result type. It does not record which source found each item. Empty optional fields may be omitted.
+Legacy JSON and XML group findings by result type without producer attribution. JSONL records the passive sources and active actions for each finding. Empty optional fields may be omitted.
 BuiltWith's normalized frameworks, languages, servers, CMS products, and analytics products are retained in JSONL and completed-result SQLite rows.
 
 A checkmark means the source can add that result type. The **Separate output** column lists REST endpoints and optional actions that return other data.
@@ -214,7 +214,7 @@ Never commit populated configuration files, API keys, account details, or provid
 - `-f NAME` writes `NAME.json`, `NAME.xml`, and `NAME.jsonl`.
 - Screenshots are written to the directory passed to `--screenshot`.
 - Host, email, IP, and related scan records are stored in `~/.local/share/theHarvester/stash.sqlite`.
-- Full-pipeline runs are also stored transactionally by run UUID with their completed, deduplicated findings. Early REST returns and DNS-brute utility requests are not recorded as completed runs.
+- CLI and REST runs, including dedicated DNS-brute requests, are stored transactionally by run UUID with their completed, deduplicated findings.
 - REST queries return JSON.
 
 Treat collected OSINT as potentially sensitive. Keep report files, screenshots, and the local database out of source control and share them only within the authorized engagement.
@@ -237,14 +237,17 @@ The JSON report is a single object that preserves the legacy automation contract
 
 The XML report contains the command, emails, hosts, and virtual hosts. Use JSON when you need the additional result types above.
 
-The JSONL report is finalized after the selected one-shot actions finish. The first line identifies the run with its UUID, target, UTC timestamps, result counts, and schema version. Each later line is one sorted, deduplicated finding. When you concatenate report files, treat each summary line as the start of a new run.
+The JSONL report is finalized after the selected one-shot actions finish. The first line identifies the run with its UUID, target, UTC timestamps, result counts, schema version, source and action execution outcomes, and screenshot artifact references. Each later line is one sorted, deduplicated finding with the passive sources and active actions that produced it. Empty arrays mean no producer of that type was recorded. When you concatenate report files, treat each summary line as the start of a new run.
 
 ```jsonl
-{"completed_at":"2026-08-07T12:01:00Z","counts":{"hostname":1},"result_count":1,"run_id":"123e4567-e89b-12d3-a456-426614174000","schema_version":"theharvester-results-v1","started_at":"2026-08-07T12:00:00Z","target":"example.com","type":"summary"}
-{"type":"hostname","value":"api.example.com"}
+{"action_executions":[{"action":"dns-resolve","duration_ms":25.4,"error_type":null,"result_count":2,"status":"succeeded","stop_reason":null}],"artifacts":[],"completed_at":"2026-08-07T12:01:00Z","counts":{"hostname":1,"ip-address":1},"result_count":2,"run_id":"123e4567-e89b-12d3-a456-426614174000","schema_version":"theharvester-results-v1","source_executions":[{"duration_ms":120.5,"error_type":null,"result_count":1,"source":"crtsh","status":"succeeded","stop_reason":null}],"started_at":"2026-08-07T12:00:00Z","target":"example.com","type":"summary"}
+{"actions":[],"sources":["crtsh"],"type":"hostname","value":"api.example.com"}
+{"actions":["dns-resolve"],"sources":[],"type":"ip-address","value":"192.0.2.10"}
 ```
 
-JSONL v1 is easy to stream for simple findings, but it is not uniformly self-describing. Finding lines inherit their run ID and target from the preceding summary. Structured result types, including recursive DNS records plus `person`, `infostealer`, `shodan`, and `takeover`, store a JSON object inside the string `value` to preserve the v1 wire format. Parse those values a second time with `fromjson`. JSONL v1 does not include source execution records or source attribution.
+JSONL v1 is easy to stream for simple findings and producer attribution, but it is not uniformly self-describing. Finding lines inherit their run ID and target from the preceding summary. Structured result types, including recursive DNS records plus `person`, `infostealer`, `shodan`, and `takeover`, store a JSON object inside the string `value` to preserve the v1 wire format. Parse those values a second time with `fromjson`.
+
+Execution records include zero-result, partial, failed, rate-limited, and skipped work, so a missing finding is not confused with a source or action that never ran. Screenshot artifacts record the related finding, file path, media type, size, and SHA-256 digest. Image bytes remain in the operator-selected screenshot directory and are not embedded in JSONL or SQLite.
 
 Parse recursive DNS findings as JSON objects:
 
@@ -258,6 +261,12 @@ List every JSONL finding as tab-separated type and value columns:
 
 ```bash
 jq -r 'select(.type != "summary") | [.type, .value] | @tsv' report.jsonl
+```
+
+List each finding with its passive sources and active actions:
+
+```bash
+jq -c 'select(.type != "summary") | {type, value, sources, actions}' report.jsonl
 ```
 
 List discovered hosts with [`jq`](https://jqlang.org/):

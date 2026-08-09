@@ -38,9 +38,23 @@ Completed CLI and REST `/query` executions also store one normalized terminal
 record keyed by run UUID. REST keeps its existing response shape and does not
 write report files unless a filename is requested.
 
+Run-bound tables keep the terminal findings separate from how they were produced:
+
+- `source_executions` records every passive source that ran, including zero-result and incomplete exits.
+- `discovery_observations` links passive sources to the normalized findings they observed.
+- `action_executions` records DNS, screenshot, takeover, Shodan, and API scan actions.
+- `action_observations` links those active actions to their normalized findings.
+- `run_artifacts` records screenshot paths, media types, sizes, and SHA-256 digests without storing image bytes in SQLite.
+
+This supports per-run observed, unique, and shared yield comparisons without duplicating the terminal result set. Database initialization upgrades schema versions 1 and 2 to version 3 in place. Existing completed results and passive-source provenance remain intact; older observations that were never tied to a run retain a null run UUID.
+
+## JSONL reports
+
+The JSONL summary contains source and action execution outcomes plus artifact references. Each finding contains `sources` and `actions` arrays. This keeps the file streamable while preserving enough producer attribution for later analysis. See the [README report format](https://github.com/laramies/theHarvester/blob/dev/README.md#report-formats) for examples.
+
 ## Screenshots
 
-`--screenshot DIR` writes browser captures to the selected directory. Screenshots may contain authentication pages, internal names, or other sensitive visual data even when no credentials were used.
+`--screenshot DIR` writes browser captures to the selected directory. Completed evidence records each successful capture's path, size, media type, and SHA-256 digest. The PNG bytes remain on disk and are not stored in SQLite or JSONL. Screenshots may contain authentication pages, internal names, or other sensitive visual data even when no credentials were used.
 
 ## REST JSON
 

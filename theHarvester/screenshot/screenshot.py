@@ -2,12 +2,16 @@
 take screenshots
 """
 
+import asyncio
+import hashlib
 import logging
 import os
 import ssl
 import sys
 from collections.abc import Collection
 from datetime import datetime
+from pathlib import Path
+from typing import NamedTuple
 
 import aiohttp
 import certifi
@@ -15,6 +19,20 @@ from aiohttp_socks import ProxyConnector
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
+
+
+class ScreenshotCapture(NamedTuple):
+    url: str
+    path: str
+    size_bytes: int
+    sha256: str
+
+
+def _capture_metadata(url: str, path: str) -> ScreenshotCapture:
+    screenshot_path = Path(path)
+    with screenshot_path.open('rb') as screenshot_file:
+        sha256 = hashlib.file_digest(screenshot_file, 'sha256').hexdigest()
+    return ScreenshotCapture(url, str(screenshot_path), screenshot_path.stat().st_size, sha256)
 
 
 class ScreenShotter:
@@ -80,7 +98,7 @@ class ScreenShotter:
             logger.info(f'An exception has occurred while attempting to visit {url} : {e}')
             return '', ''
 
-    async def take_screenshot(self, url: str) -> str:
+    async def take_screenshot(self, url: str) -> ScreenshotCapture | None:
         url = f'https://{url}' if not url.startswith(('http://', 'https://')) else url
         logger.info(f'Attempting to take a screenshot of: {url}')
         async with async_playwright() as p:
@@ -104,4 +122,4 @@ class ScreenShotter:
                 await context.close()
                 await browser.close()
                 logger.info(f'{date} {url} {path}')
-        return url if path else ''
+        return await asyncio.to_thread(_capture_metadata, url, path) if path else None
