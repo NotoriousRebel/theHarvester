@@ -4,6 +4,7 @@ import aiohttp
 import pytest
 
 from theHarvester.discovery import api_endpoints
+from theHarvester.lib.core import FetcherResponse
 
 
 class FakeResponse:
@@ -62,6 +63,7 @@ async def test_api_endpoint_scan_uses_only_observational_http_methods(monkeypatc
     methods = []
 
     monkeypatch.setattr(search, '_load_wordlist', lambda: [])
+
     async def detect_schema():
         return 'https'
 
@@ -75,6 +77,76 @@ async def test_api_endpoint_scan_uses_only_observational_http_methods(monkeypatc
     await search.do_search()
 
     assert methods == ['GET', 'HEAD', 'OPTIONS']
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_scan_reports_suppressed_top_level_failure(monkeypatch) -> None:
+    search = api_endpoints.SearchApiEndpoints('example.com')
+
+    async def fail_schema_detection() -> str:
+        raise RuntimeError('scan setup failed')
+
+    monkeypatch.setattr(search, '_detect_schema', fail_schema_detection)
+
+    await search.do_search()
+
+    assert search.execution_error_type == 'RuntimeError'
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_scan_counts_suppressed_request_failures(monkeypatch) -> None:
+    search = api_endpoints.SearchApiEndpoints('example.com')
+    search.common_api_paths = ['/api']
+    monkeypatch.setattr(search, '_load_wordlist', lambda: [])
+
+    async def detect_schema() -> str:
+        return 'https'
+
+    async def fail_request(*_args, **_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(search, '_detect_schema', detect_schema)
+    monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fail_request)
+
+    await search.do_search()
+
+    assert search.request_error_count == 3
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_check_uses_shared_fetcher_metadata(monkeypatch) -> None:
+    search = api_endpoints.SearchApiEndpoints('example.com')
+
+    async def fetch(*_args, **kwargs):
+        assert kwargs['include_metadata'] is True
+        return FetcherResponse(
+            body='{"status":"ok"}',
+            status=200,
+            headers={'content-type': 'application/json'},
+        )
+
+    monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fetch)
+
+    result = await search._check_endpoint('https://example.com/api')
+
+    assert result is not None
+    assert result.status_code == 200
+    assert result.content_type == 'application/json'
+    assert result.content_length == len('{"status":"ok"}')
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_check_counts_shared_fetcher_transport_failures(monkeypatch) -> None:
+    search = api_endpoints.SearchApiEndpoints('example.com')
+
+    async def fetch(*_args, **kwargs):
+        assert kwargs['include_metadata'] is True
+        return None
+
+    monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fetch)
+
+    assert await search._check_endpoint('https://example.com/api') is None
+    assert search.request_error_count == 3
 
 
 @pytest.mark.asyncio

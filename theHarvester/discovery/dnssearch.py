@@ -32,6 +32,8 @@ class DnsForce:
         self.subdo = False
         self.verbose = verbose
         self.records: dict[str, hostchecker.HostDnsRecords] = {}
+        self.error_count = 0
+        self.error_types: set[str] = set()
         # self.dnsserver = [dnsserver] if isinstance(dnsserver, str) else dnsserver
         # self.dnsserver = list(map(str, dnsserver.split(','))) if isinstance(dnsserver, str) else dnsserver
         self.dnsserver = dnsserver
@@ -45,6 +47,8 @@ class DnsForce:
         checker = hostchecker.Checker(self.list, nameservers=self.dnsserver)
         resolved_pair, hosts, ips = await checker.check()
         self.records = checker.records
+        self.error_count = getattr(checker, 'error_count', 0)
+        self.error_types = getattr(checker, 'error_types', set())
         return resolved_pair, hosts, ips
 
 
@@ -128,8 +132,10 @@ async def reverse_single_ip(ip: str, resolver: DNSResolver) -> str:
     try:
         __host = await resolver.gethostbyaddr(ip)
         return __host.name if __host else ''
-    except Exception:
-        return ''
+    except Exception as error:
+        if hostchecker.is_expected_dns_absence(error):
+            return ''
+        raise
 
 
 async def reverse_all_ips_in_range(iprange: str, callback: Callable, nameservers: list[str] | None = None) -> None:

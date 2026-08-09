@@ -146,6 +146,39 @@ async def test_check_excludes_candidate_without_usable_evidence(
 
 
 @pytest.mark.asyncio
+async def test_check_distinguishes_expected_absence_from_resolver_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    not_found = hostchecker.aiodns.error.DNSError(hostchecker.aiodns.error.ARES_ENOTFOUND, 'not found')
+
+    class FakeResolver:
+        async def query_dns(self, host: str, _record_type: str):
+            if host == 'missing.example.com':
+                raise not_found
+            raise TimeoutError('resolver timed out')
+
+    monkeypatch.setattr(hostchecker.aiodns, 'DNSResolver', lambda **_kwargs: FakeResolver())
+    checker = hostchecker.Checker(['missing.example.com', 'timeout.example.com'], nameservers=[])
+
+    assert await checker.check() == ([], [], [])
+    assert checker.error_count == 3
+    assert checker.error_types == {'TimeoutError'}
+
+
+@pytest.mark.asyncio
+async def test_reverse_lookup_propagates_transport_failure_but_not_missing_ptr(monkeypatch: pytest.MonkeyPatch) -> None:
+    class MissingResolver:
+        async def gethostbyaddr(self, _ip: str):
+            raise hostchecker.aiodns.error.DNSError(hostchecker.aiodns.error.ARES_ENODATA, 'no data')
+
+    class FailedResolver:
+        async def gethostbyaddr(self, _ip: str):
+            raise TimeoutError('resolver timed out')
+
+    assert await dnssearch.reverse_single_ip('192.0.2.1', MissingResolver()) == ''
+    with pytest.raises(TimeoutError, match='resolver timed out'):
+        await dnssearch.reverse_single_ip('192.0.2.1', FailedResolver())
+
+
+@pytest.mark.asyncio
 async def test_check_propagates_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResolver:
         async def query_dns(self, _host: str, _record_type: str):
