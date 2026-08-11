@@ -25,7 +25,6 @@ def test_email_capability_expands_to_email_sources() -> None:
         "brave",
         "censys",
         "dehashed",
-        "duckduckgo",
         "github-code",
         "gitlab",
         "hibpverified",

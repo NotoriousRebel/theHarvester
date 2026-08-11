@@ -304,7 +304,6 @@ class Core:
             'dehashed',
             'dnsdb',
             'dnsdumpster',
-            'duckduckgo',
             'dymo',
             'fofa',
             'fullhunt',

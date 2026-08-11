@@ -40,6 +40,12 @@ def test_invalid_bitbucket_domain_source_is_not_selectable() -> None:
     assert 'bitbucket' not in _scheduled_source_names()
 
 
+def test_unsupported_duckduckgo_source_is_not_selectable() -> None:
+    assert 'duckduckgo' not in Core.get_supportedengines()
+    assert 'duckduckgo' not in SOURCE_SPECS
+    assert 'duckduckgo' not in _scheduled_source_names()
+
+
 def test_subdomain_route_drives_subdomain_capability() -> None:
     spec = SourceSpec(
         name='example',
