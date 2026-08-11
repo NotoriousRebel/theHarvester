@@ -131,7 +131,6 @@ _SPECS = (
     _spec('dehashed', ResultRoute.EMAILS, ResultRoute.IPS),
     _spec('dnsdb', ResultRoute.SUBDOMAINS),
     _spec('dnsdumpster', ResultRoute.SUBDOMAINS, ResultRoute.IPS),
-    _spec('duckduckgo', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS),
     _spec('dymo', ResultRoute.SUBDOMAINS),
     _spec('fofa', ResultRoute.SUBDOMAINS, ResultRoute.IPS),
     _spec('fullhunt', ResultRoute.SUBDOMAINS),
