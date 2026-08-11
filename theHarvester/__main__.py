@@ -71,6 +71,7 @@ from theHarvester.discovery import (
     shodan_internetdb,
     shodanct,
     shodansearch,
+    sourcegraph,
     subdomaincenter,
     subdomainfinderc99,
     takeover,
@@ -1537,6 +1538,10 @@ async def start(
                         stor_lst.append(store(shodanct_search, engineitem))
                     except Exception as e:
                         show_default_error_message(engineitem, word, e)
+
+                elif engineitem == 'sourcegraph':
+                    sourcegraph_search = sourcegraph.SearchSourcegraph(word, limit)
+                    stor_lst.append(store(sourcegraph_search, engineitem))
 
                 elif engineitem == 'subdomaincenter':
                     try:
