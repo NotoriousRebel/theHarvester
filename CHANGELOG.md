@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the obsolete bundled IP-range and resolver snapshots.
 - Removed the REST API's built-in SlowAPI request limiter and its launcher option without adding a replacement.
 - Removed Bitbucket domain discovery because its current REST APIs require workspace, repository, or user scope that the domain-only CLI contract cannot provide.
+- Removed DuckDuckGo discovery because its public Instant Answer endpoint is not a general web-results API and its result pages do not permit crawler access.
 - Removed the nonfunctional ThreatCrowd source because its service hostnames terminate at deleted AWS load balancers and return NXDOMAIN; OTX remains available through its separate adapter.
 
 ### Fixed

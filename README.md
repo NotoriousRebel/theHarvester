@@ -176,7 +176,6 @@ Read the **API key** column as follows:
 | `dehashed` | No | ✓ | ✓ | No | No | No | No | No | ✓ |
 | `dnsdb` | ✓ | No | No | No | No | No | No | No | ✓ |
 | `dnsdumpster` | ✓ | No | ✓ | No | No | No | No | No | ✓ |
-| `duckduckgo` | ✓ | ✓ | No | No | No | No | No | No | No |
 | `dymo` | ✓ | No | No | No | No | No | No | No | ✓ |
 | `fofa` | ✓ | No | ✓ | No | No | No | No | No | ✓ |
 | `fullhunt` | ✓ | No | No | No | No | No | No | No | ✓ |

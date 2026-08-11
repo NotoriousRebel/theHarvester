@@ -41,7 +41,6 @@ from theHarvester.discovery import (
     crtsh,
     dnsdb,
     dnssearch,
-    duckduckgosearch,
     dymosearch,
     fofa,
     fullhuntsearch,
@@ -1133,15 +1132,6 @@ async def start(
                     except Exception as e:
                         show_default_error_message(engineitem, word, e)
 
-                elif engineitem == 'duckduckgo':
-                    duckduckgo_search = duckduckgosearch.SearchDuckDuckGo(word, limit)
-                    stor_lst.append(
-                        store(
-                            duckduckgo_search,
-                            engineitem,
-                        )
-                    )
-
                 elif engineitem == 'dymo':
                     try:
                         dymo_search = dymosearch.SearchDymo(word)
@@ -1775,6 +1765,11 @@ async def start(
             unsupported_engines = set(engines) - set(Core.get_supportedengines())
             if unsupported_engines:
                 output_logger.info(f'The following engines are not supported: {unsupported_engines}')
+            if any(engine.casefold() == 'duckduckgo' for engine in unsupported_engines):
+                output_logger.info(
+                    'The duckduckgo source was removed because the DuckDuckGo Instant Answer API is not a web-search '
+                    'endpoint; choose a source listed by --help.'
+                )
             output_logger.info('\n[!] Invalid source.\n')
             sys.exit(1)
 
