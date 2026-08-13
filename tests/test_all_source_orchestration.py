@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 
 from theHarvester import __main__ as theharvester_main
+from theHarvester.lib import source_runner
 from theHarvester.lib.source_catalog import SOURCE_SPECS, ActivityClass
 
 NON_PASSIVE_SOURCES = (
@@ -246,7 +247,8 @@ async def test_all_schedules_each_passive_catalog_source_once_and_reports_result
     discovery_modules = sorted(
         {
             value
-            for value in vars(theharvester_main).values()
+            for namespace in (vars(theharvester_main), vars(source_runner))
+            for value in namespace.values()
             if isinstance(value, ModuleType) and value.__name__.startswith('theHarvester.discovery.')
         },
         key=lambda module: module.__name__,
