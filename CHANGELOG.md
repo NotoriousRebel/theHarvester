@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added root contributor and security policies, structured issue forms, repository agent guidance, discovery terminology, and an operator-focused documentation wiki ([d090a29a](https://github.com/laramies/theHarvester/commit/d090a29a), [7c491ef5](https://github.com/laramies/theHarvester/commit/7c491ef5), [8b9d420b](https://github.com/laramies/theHarvester/commit/8b9d420b)).
 
 ### Changed
+- Migrated BuiltWith to the current v23 Domain API with privacy-preserving request controls, nested result parsing, and truthful partial or failed outcomes.
 - Migrated Censys discovery from the deprecated Python Search SDK to the Censys Platform API, using a Personal Access Token and optional organization ID.
 - Migrated Hudson Rock to its authenticated v3 discovery and domain-search endpoints with bounded pagination and sanitized typed credential-exposure evidence.
 - Removed the transport-wide delay before reading ready HTTP responses, bounded Wayback Archive to 30 seconds and Common Crawl to 120 seconds, kept both sources within the requested result limit, and made long-source progress visible in verbose mode. Common Crawl now requests one 50-record page at a time instead of bursting page batches.
