@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Routed APIs.guru and Sourcegraph through an immutable, transport-neutral source runner with explicit factories, typed outcomes, bounded structured tasks, and native cancellation propagation.
 - Renamed the CLI's custom API endpoint path option to `--api-wordlist`; `-w` and `--wordlist` remain warning-emitting compatibility aliases for one release and never change DNS brute-force candidates.
+- Reworked screenshot scans to use one bounded aiohttp session and one shared browser, with isolated per-target contexts, status-based reachability, and deterministic async cleanup.
 - Migrated BuiltWith to the current v23 Domain API with privacy-preserving request controls, nested result parsing, and truthful partial or failed outcomes.
 - Migrated Censys discovery from the deprecated Python Search SDK to the Censys Platform API, using a Personal Access Token and optional organization ID.
 - Migrated Hudson Rock to its authenticated v3 discovery and domain-search endpoints with bounded pagination and sanitized typed credential-exposure evidence.
