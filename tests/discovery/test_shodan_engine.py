@@ -348,6 +348,10 @@ class TestShodanEngine:
     async def test_shodan_engine_processes_without_work_item_error_and_yields_hostnames(self, monkeypatch, capsys):
         # Import inside the test so monkeypatching affects the already-imported module namespace.
         import theHarvester.__main__ as main_module
+        from theHarvester.lib import source_runner
+        from theHarvester.lib.completed_result import CompletedResult
+
+        completed_results: list[CompletedResult] = []
 
         # Avoid filesystem/sqlite side effects.
         class DummyResultStore:
@@ -356,6 +360,9 @@ class TestShodanEngine:
 
             async def record_observations(self, domain, all, res_type, source) -> None:
                 return None
+
+            async def save_run(self, result: CompletedResult) -> None:
+                completed_results.append(result)
 
         monkeypatch.setattr(main_module, 'ResultStore', DummyResultStore, raising=True)
 
@@ -370,7 +377,7 @@ class TestShodanEngine:
             async def get_hostnames(self):
                 return {'a.example.com', 'b.example.com'}
 
-        monkeypatch.setattr(main_module.shodansearch, 'SearchShodan', DummySearchShodan, raising=True)
+        monkeypatch.setattr(source_runner.shodansearch, 'SearchShodan', DummySearchShodan, raising=True)
 
         # Run the CLI path that uses the engine queue/worker (`-b shodan`).
         monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'shodan'], raising=True)
@@ -383,6 +390,10 @@ class TestShodanEngine:
         assert 'An error occurred while processing a "work item"' not in out
         output_tokens = set(out.split())
         assert {'a.example.com', 'b.example.com'} <= output_tokens
+        assert completed_results[0].source_executions[0].source == 'shodan'
+        assert completed_results[0].source_executions[0].status == 'completed'
+        assert completed_results[0].source_executions[0].result_count == 2
+        assert {observation.source for observation in completed_results[0].observations} == {'shodan'}
 
     @pytest.mark.asyncio
     async def test_shodan_internetdb_ignores_non_string_resolved_addresses(self, monkeypatch):

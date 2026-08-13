@@ -10,6 +10,7 @@ import pytest
 from theHarvester import __main__ as theharvester_main
 from theHarvester.discovery import hudsonrocksearch
 from theHarvester.discovery.constants import MissingKey
+from theHarvester.lib import source_runner
 from theHarvester.lib.core import FetcherResponse
 
 if TYPE_CHECKING:
@@ -470,7 +471,7 @@ async def test_sanitized_exposure_keeps_separate_legacy_projection(
 
     report = tmp_path / 'hudsonrock-report'
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.hudsonrocksearch, 'SearchHudsonRock', FakeHudsonRock)
+    monkeypatch.setattr(source_runner.hudsonrocksearch, 'SearchHudsonRock', FakeHudsonRock)
     monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'hudsonrock', '-f', str(report)])
 
     with pytest.raises(SystemExit) as exit_info:
@@ -481,5 +482,9 @@ async def test_sanitized_exposure_keeps_separate_legacy_projection(
         0
     ].results
     assert ('infostealer', '{"email":"employee@example.com"}') in completed_results[0].results
+    assert completed_results[0].source_executions[0].source == 'hudsonrock'
+    assert completed_results[0].source_executions[0].status == 'completed'
+    assert completed_results[0].source_executions[0].result_count == 2
+    assert {observation.source for observation in completed_results[0].observations} == {'hudsonrock'}
     records = [json.loads(line) for line in report.with_suffix('.jsonl').read_text().splitlines()]
     assert {record['type'] for record in records} >= {'credential-exposure', 'infostealer'}
