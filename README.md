@@ -87,6 +87,8 @@ uv run theHarvester -h
 
 Options such as DNS brute force (`-c`), bounded recursive DNS (`--dns-recursive-depth`), reverse DNS lookup (`-n`), takeover checks (`-t`), API endpoint scanning (`-a`), DNS resolution (`-r`), and screenshots (`--screenshot`) generate additional network activity. Use them only within an explicitly authorized scope.
 
+Use `--api-wordlist FILE` with `--api-scan` to replace the bundled API endpoint paths. It affects only API endpoint scanning; DNS brute force continues to use its bundled DNS candidates. `-w` and `--wordlist` are deprecated compatibility aliases supported for this release and emit a warning.
+
 Recursive DNS requires exactly three distinct resolver IPs through `--dns-resolvers` or the compatible `--dns-resolve` value. It advances only names with two-vantage address consensus that are distinguishable from closest-encloser wildcard controls. Depth, DNS record query, and runtime limits are configurable through the three `--dns-recursive-*` options; the default query ceiling is 3,000 record queries across resolver vantages, and three consecutive zero-yield batches also stop recursion. PTR names for current addresses are retained as secondary evidence, but they do not establish current addressability or become recursion seeds. HarvestView and `POST /api/v1/runs` expose the same controls.
 
 Screenshot capture also requires a Playwright-compatible browser; see the installation guide for setup.

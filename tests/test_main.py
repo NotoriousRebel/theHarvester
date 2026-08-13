@@ -52,11 +52,53 @@ async def test_cli_help_explains_proxy_and_direct_action_scope(
     assert 'Multiple capabilities select the union of matching sources; they do not filter returned fields.' in help_text
     assert 'Check common API paths with GET, HEAD, and OPTIONS.' in help_text
     assert 'Requests follow redirects.' in help_text
+    assert '--api-wordlist' in help_text
+    assert 'Deprecated aliases for --api-wordlist; supported for this release only.' in help_text
     assert 'virtual host discovery' in help_text
     assert 'P2 direct interaction (active reconnaissance): sends direct HTTP and TLS requests.' in help_text
     assert 'For normal use, pass only --vhost; bounded safety defaults apply automatically.' in help_text
     assert 'virtual host advanced controls' in help_text
     assert 'Candidate names are never resolved through DNS.' in help_text
+
+
+@pytest.mark.parametrize(
+    ('option', 'deprecated'),
+    [
+        ('--api-wordlist', False),
+        ('-w', True),
+        ('--wordlist', True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_cli_api_wordlist_spellings_use_the_same_scan_input(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    option: str,
+    deprecated: bool,
+) -> None:
+    received: list[tuple[str, str, bool]] = []
+
+    def stop_api_scan(*, word: str, wordlist: str, exact_paths: bool = False) -> None:
+        received.append((word, wordlist, exact_paths))
+        raise RuntimeError('offline test stop')
+
+    api_wordlist = tmp_path / 'api-paths.txt'
+    api_wordlist.write_text('/health\n', encoding='utf-8')
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(theharvester_main.api_endpoints, 'SearchApiEndpoints', stop_api_scan)
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-a', option, str(api_wordlist)])
+    caplog.set_level(logging.WARNING, logger='theHarvester.output')
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert received == [('example.test', str(api_wordlist), True)]
+    if deprecated:
+        assert '-w and --wordlist are deprecated; use --api-wordlist' in caplog.text
+    else:
+        assert 'deprecated; use --api-wordlist' not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -696,6 +738,44 @@ async def test_dns_brute_utility_persists_action_evidence_before_return(monkeypa
         ('ip', '192.0.2.10'),
     }
     assert legacy_writes == []
+
+
+@pytest.mark.asyncio
+async def test_cli_api_wordlist_does_not_replace_dns_brute_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checked_hosts: list[list[str]] = []
+    dns_names = tmp_path / 'dns-names.txt'
+    dns_names.write_text('www\n', encoding='utf-8')
+    api_wordlist = tmp_path / 'api-paths.txt'
+    api_wordlist.write_text('/health\n', encoding='utf-8')
+
+    class FakeChecker:
+        records: ClassVar[dict[str, HostDnsRecords]] = {}
+        query_error_count = 0
+        query_error_types: ClassVar[set[str]] = set()
+
+        def __init__(self, hosts: list[str], nameservers: list[str]) -> None:
+            checked_hosts.append(hosts)
+
+        async def check(self) -> tuple[list[str], list[str], list[str]]:
+            return [], [], []
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(theharvester_main.dnssearch, 'DNS_NAMES', dns_names)
+    monkeypatch.setattr(theharvester_main.dnssearch.hostchecker, 'Checker', FakeChecker)
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        ['theHarvester', '-d', 'example.test', '-c', '--api-wordlist', str(api_wordlist)],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert checked_hosts == [['www.example.test']]
 
 
 @pytest.mark.asyncio

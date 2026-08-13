@@ -84,7 +84,13 @@ AUTHORIZED_DOMAIN='replace-with-a-domain-you-control'
 uv run theHarvester -d "$AUTHORIZED_DOMAIN" -a
 ```
 
-Provide a custom path wordlist with `-w FILE`. This sends requests directly to the target and must be explicitly in scope.
+Provide a custom API path wordlist with `--api-wordlist FILE`:
+
+```bash
+uv run theHarvester -d "$AUTHORIZED_DOMAIN" -a --api-wordlist api-paths.txt
+```
+
+This option changes only API endpoint scanning; DNS brute force always uses its bundled DNS candidates. `-w` and `--wordlist` remain deprecated compatibility aliases for this release and emit a warning. API scans send requests directly to the target and must be explicitly in scope.
 
 ## Diagnose one provider
 
