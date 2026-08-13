@@ -9,7 +9,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakSet
 
 import anyio
 
@@ -27,7 +27,12 @@ from theHarvester.lib.virtual_host import (
     DEFAULT_VHOST_TIMEOUT_SECONDS,
 )
 
-from .run_artifacts import ensure_private_directory, read_child_evidence, write_child_evidence
+from .run_artifacts import (
+    ensure_private_directory,
+    read_child_evidence,
+    serialize_child_evidence,
+    write_child_evidence_payload,
+)
 from .run_store import RunStore
 
 if TYPE_CHECKING:
@@ -38,6 +43,94 @@ _worker_stop: asyncio.Event | None = None
 _worker_wakeup: asyncio.Event | None = None
 _worker_owner: str | None = None
 _process_groups: WeakKeyDictionary[asyncio.subprocess.Process, int] = WeakKeyDictionary()
+_process_jobs: WeakKeyDictionary[asyncio.subprocess.Process, int] = WeakKeyDictionary()
+_stopped_process_trees: WeakSet[asyncio.subprocess.Process] = WeakSet()
+MAX_CAPTURED_OUTPUT_BYTES = 200_000
+_MAX_CAPTURED_STREAM_BYTES = 99_900
+_OUTPUT_READ_BYTES = 64 * 1024
+_OUTPUT_DRAIN_SECONDS = 2
+_OUTPUT_TIMEOUT_MARKER = '[child output collection timed out and was truncated]'
+
+
+def _assign_windows_job(process_id: int) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = vars(ctypes)['WinDLL']('kernel32', use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise vars(ctypes)['WinError'](vars(ctypes)['get_last_error']())
+    process_handle = kernel32.OpenProcess(0x0101, False, process_id)
+    if not process_handle:
+        kernel32.CloseHandle(job)
+        raise vars(ctypes)['WinError'](vars(ctypes)['get_last_error']())
+    try:
+        if not kernel32.AssignProcessToJobObject(job, process_handle):
+            raise vars(ctypes)['WinError'](vars(ctypes)['get_last_error']())
+    except BaseException:
+        kernel32.CloseHandle(job)
+        raise
+    finally:
+        kernel32.CloseHandle(process_handle)
+    return int(job)
+
+
+def _terminate_windows_job(job: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = vars(ctypes)['WinDLL']('kernel32', use_last_error=True)
+    kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    if not kernel32.TerminateJobObject(job, 1):
+        error = vars(ctypes)['get_last_error']()
+        if error != 6:  # The handle may already be closed by completed cleanup.
+            raise vars(ctypes)['WinError'](error)
+
+
+def _resume_windows_process(process_id: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    windows = vars(ctypes)
+    kernel32 = windows['WinDLL']('kernel32', use_last_error=True)
+    ntdll = windows['WinDLL']('ntdll')
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+    ntdll.NtResumeProcess.restype = wintypes.LONG
+    process_handle = kernel32.OpenProcess(0x0800, False, process_id)
+    if not process_handle:
+        raise windows['WinError'](windows['get_last_error']())
+    try:
+        status = ntdll.NtResumeProcess(process_handle)
+        if status != 0:
+            raise OSError(f'NtResumeProcess failed with status {status:#x}')
+    finally:
+        kernel32.CloseHandle(process_handle)
+
+
+def _close_windows_job(job: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = vars(ctypes)['WinDLL']('kernel32', use_last_error=True)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    if not kernel32.CloseHandle(job):
+        error = vars(ctypes)['get_last_error']()
+        if error != 6:
+            raise vars(ctypes)['WinError'](error)
 
 
 def worker_enabled() -> bool:
@@ -63,7 +156,7 @@ async def _default_process_factory(run_id: str, database: Path, _artifact_dir_pa
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0),
+            creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x200) | getattr(subprocess, 'CREATE_SUSPENDED', 0x4),
         )
     else:
         process = await asyncio.create_subprocess_exec(
@@ -72,8 +165,38 @@ async def _default_process_factory(run_id: str, database: Path, _artifact_dir_pa
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
-    if process.pid is not None:
-        _process_groups[process] = process.pid
+    if process.pid is None:
+        process.kill()
+        await process.wait()
+        raise RuntimeError('Child process started without a process identifier')
+    process_job = None
+    try:
+        if os.name == 'nt':
+            process_job = _assign_windows_job(process.pid)
+            _resume_windows_process(process.pid)
+            _process_jobs[process] = process_job
+        else:
+            _process_groups[process] = process.pid
+    except BaseException:
+        if process_job is not None:
+            try:
+                _terminate_windows_job(process_job)
+            except BaseException:
+                pass
+            try:
+                _close_windows_job(process_job)
+            except BaseException:
+                pass
+        try:
+            if process.returncode is None:
+                process.kill()
+        except BaseException:
+            pass
+        try:
+            await process.wait()
+        except BaseException:
+            pass
+        raise
     return process
 
 
@@ -81,14 +204,51 @@ _process_factory: Callable[[str, Path, Path], Awaitable[asyncio.subprocess.Proce
 
 
 async def _process_output(process: asyncio.subprocess.Process) -> str:
-    async def read(stream: asyncio.StreamReader | None) -> bytes:
-        return await stream.read() if stream is not None else b''
+    async def read(name: str, stream: asyncio.StreamReader | None) -> str:
+        if stream is None:
+            return ''
+        captured = bytearray()
+        truncated = False
+        while chunk := await stream.read(_OUTPUT_READ_BYTES):
+            remaining = _MAX_CAPTURED_STREAM_BYTES - len(captured)
+            if remaining > 0:
+                captured.extend(chunk[:remaining])
+            truncated = truncated or len(chunk) > remaining
+        output = captured.decode('utf-8', errors='replace').strip()
+        encoded = output.encode()
+        truncated = truncated or len(encoded) > _MAX_CAPTURED_STREAM_BYTES
+        if truncated:
+            marker = f'[{name} truncated: {_MAX_CAPTURED_STREAM_BYTES}-byte log budget]'
+            content_budget = _MAX_CAPTURED_STREAM_BYTES - len(marker.encode()) - 1
+            output = encoded[:content_budget].decode('utf-8', errors='ignore').strip()
+            output = f'{output}\n{marker}' if output else marker
+        return output
 
-    stdout, stderr = await asyncio.gather(read(process.stdout), read(process.stderr))
-    return '\n'.join(part.decode('utf-8', errors='replace').strip() for part in (stdout, stderr) if part).strip()
+    readers = [
+        asyncio.create_task(read('stdout', process.stdout)),
+        asyncio.create_task(read('stderr', process.stderr)),
+    ]
+    try:
+        stdout, stderr = await asyncio.gather(*readers)
+    finally:
+        for reader in readers:
+            if not reader.done():
+                reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+    return '\n'.join(part for part in (stdout, stderr) if part).strip()
 
 
 async def _signal_process_tree(process: asyncio.subprocess.Process, *, force: bool) -> None:
+    process_job = _process_jobs.get(process)
+    if process_job is not None and os.name == 'nt':
+        if force:
+            await asyncio.to_thread(_terminate_windows_job, process_job)
+        elif process.returncode is None:
+            try:
+                process.send_signal(getattr(signal, 'CTRL_BREAK_EVENT', 1))
+            except ProcessLookupError:
+                pass
+        return
     process_group = _process_groups.get(process)
     if process_group is not None and os.name != 'nt':
         try:
@@ -121,83 +281,159 @@ async def _signal_process_tree(process: asyncio.subprocess.Process, *, force: bo
 
 
 async def _stop_process(process: asyncio.subprocess.Process, wait_task: asyncio.Task[int]) -> None:
-    if process.returncode is None:
-        await _signal_process_tree(process, force=False)
+    if process in _stopped_process_trees:
+        await wait_task
+        return
+    owns_process_tree = process in _process_groups or process in _process_jobs
+    cleanup_error: BaseException | None = None
+    try:
+        if process.returncode is None or owns_process_tree:
+            await _signal_process_tree(process, force=False)
+    except BaseException as error:
+        cleanup_error = error
     try:
         await asyncio.wait_for(asyncio.shield(wait_task), timeout=2)
     except TimeoutError:
-        if process.returncode is None:
+        pass
+    except BaseException as error:
+        cleanup_error = cleanup_error or error
+    if process.returncode is None or owns_process_tree:
+        try:
             await _signal_process_tree(process, force=True)
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
+            try:
+                if process.returncode is None:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            except BaseException as kill_error:
+                cleanup_error = cleanup_error or kill_error
+        _stopped_process_trees.add(process)
+    try:
         await wait_task
+    except BaseException as error:
+        cleanup_error = cleanup_error or error
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+async def _finish_output(
+    process: asyncio.subprocess.Process,
+    wait_task: asyncio.Task[int],
+    output_task: asyncio.Task[str],
+) -> str:
+    await _stop_process(process, wait_task)
+    try:
+        return await asyncio.wait_for(asyncio.shield(output_task), timeout=_OUTPUT_DRAIN_SECONDS)
+    except TimeoutError:
+        output_task.cancel()
+        await asyncio.gather(output_task, return_exceptions=True)
+        return _OUTPUT_TIMEOUT_MARKER
 
 
 async def _execute_claimed(store: RunStore, run: dict[str, Any], owner_id: str | None = None) -> None:
     run_id = run['run_id']
     artifact_dir = store.artifact_directory(run_id)
-    ensure_private_directory(artifact_dir)
+    await asyncio.to_thread(ensure_private_directory, artifact_dir)
     try:
         process = await _process_factory(run_id, store.database, artifact_dir)
     except (OSError, RuntimeError) as error:
         await store.fail(run_id, f'Could not start child process: {error}', '')
         return
-    wait_task = asyncio.create_task(process.wait())
-    output_task = asyncio.create_task(_process_output(process))
-    deadline = asyncio.get_running_loop().time() + int(run['request']['deadline_seconds'])
-    next_heartbeat = 0.0
-    while not wait_task.done():
-        await asyncio.sleep(0.05)
-        if owner_id is not None and asyncio.get_running_loop().time() >= next_heartbeat:
-            if not await store.heartbeat_worker_lease(owner_id):
-                await _stop_process(process, wait_task)
-                await store.fail(run_id, 'Worker lost its execution lease', await output_task)
+    try:
+        wait_task: asyncio.Task[int] | None = None
+        output_task: asyncio.Task[str] | None = None
+        wait_task = asyncio.create_task(process.wait())
+        output_task = asyncio.create_task(_process_output(process))
+        deadline = asyncio.get_running_loop().time() + int(run['request']['deadline_seconds'])
+        next_heartbeat = 0.0
+        while process.returncode is None and not wait_task.done():
+            await asyncio.sleep(0.05)
+            if output_task.done():
+                output_task.result()
+            if owner_id is not None and asyncio.get_running_loop().time() >= next_heartbeat:
+                if not await store.heartbeat_worker_lease(owner_id):
+                    log = await _finish_output(process, wait_task, output_task)
+                    await store.fail(run_id, 'Worker lost its execution lease', log)
+                    return
+                next_heartbeat = asyncio.get_running_loop().time() + 5
+            current = await store.get(run_id)
+            stopping = _worker_stop is not None and _worker_stop.is_set()
+            if current is not None and current['status'] == 'cancelling':
+                log = await _finish_output(process, wait_task, output_task)
+                evidence, evidence_error = await asyncio.to_thread(read_child_evidence, artifact_dir, str(run['target']))
+                failure_message = 'Cancelled by operator' + (f'; {evidence_error}' if evidence_error else '')
+                await store.fail(run_id, failure_message, log, cancelled=True, evidence=evidence)
                 return
-            next_heartbeat = asyncio.get_running_loop().time() + 5
+            if stopping:
+                log = await _finish_output(process, wait_task, output_task)
+                evidence, evidence_error = await asyncio.to_thread(read_child_evidence, artifact_dir, str(run['target']))
+                failure_message = 'theHarvester stopped before child completion' + (
+                    f'; {evidence_error}' if evidence_error else ''
+                )
+                await store.fail(run_id, failure_message, log, evidence=evidence)
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                log = await _finish_output(process, wait_task, output_task)
+                evidence, evidence_error = await asyncio.to_thread(read_child_evidence, artifact_dir, str(run['target']))
+                failure_message = f'Run exceeded its {run["request"]["deadline_seconds"]} second deadline'
+                if evidence_error:
+                    failure_message += f'; {evidence_error}'
+                await store.fail(
+                    run_id,
+                    failure_message,
+                    log,
+                    evidence=evidence,
+                )
+                return
+        if wait_task.done():
+            wait_task.result()
+        log = await _finish_output(process, wait_task, output_task)
         current = await store.get(run_id)
-        stopping = _worker_stop is not None and _worker_stop.is_set()
-        if current is not None and current['status'] == 'cancelling':
-            await _stop_process(process, wait_task)
-            evidence, evidence_error = read_child_evidence(artifact_dir, str(run['target']))
-            failure_message = 'Cancelled by operator' + (f'; {evidence_error}' if evidence_error else '')
-            await store.fail(run_id, failure_message, await output_task, cancelled=True, evidence=evidence)
-            return
-        if stopping:
-            await _stop_process(process, wait_task)
-            evidence, evidence_error = read_child_evidence(artifact_dir, str(run['target']))
-            failure_message = 'theHarvester stopped before child completion' + (f'; {evidence_error}' if evidence_error else '')
-            await store.fail(run_id, failure_message, await output_task, evidence=evidence)
-            return
-        if asyncio.get_running_loop().time() >= deadline:
-            await _stop_process(process, wait_task)
-            evidence, evidence_error = read_child_evidence(artifact_dir, str(run['target']))
-            failure_message = f'Run exceeded its {run["request"]["deadline_seconds"]} second deadline'
-            if evidence_error:
-                failure_message += f'; {evidence_error}'
+        evidence, evidence_error = await asyncio.to_thread(read_child_evidence, artifact_dir, str(run['target']))
+        if evidence_error:
             await store.fail(
                 run_id,
-                failure_message,
-                await output_task,
-                evidence=evidence,
+                evidence_error,
+                log,
+                cancelled=current is not None and current['status'] == 'cancelling',
             )
             return
-    log = await output_task
-    current = await store.get(run_id)
-    evidence, evidence_error = read_child_evidence(artifact_dir, str(run['target']))
-    if evidence_error:
-        await store.fail(
-            run_id,
-            evidence_error,
-            log,
-            cancelled=current is not None and current['status'] == 'cancelling',
-        )
-        return
-    if current is not None and current['status'] == 'cancelling':
-        await store.finish(run_id, evidence, log)
-    elif process.returncode == 0 and evidence is not None:
-        await store.finish(run_id, evidence, log)
-    else:
-        await store.fail(
-            run_id, f'Child process exited with status {process.returncode} without terminal completion', log, evidence=evidence
-        )
+        if current is not None and current['status'] == 'cancelling':
+            await store.finish(run_id, evidence, log)
+        elif process.returncode == 0 and evidence is not None:
+            await store.finish(run_id, evidence, log)
+        else:
+            await store.fail(
+                run_id,
+                f'Child process exited with status {process.returncode} without terminal completion',
+                log,
+                evidence=evidence,
+            )
+    finally:
+
+        async def cleanup() -> None:
+            cleanup_wait_task = wait_task or asyncio.get_running_loop().create_task(process.wait())
+            try:
+                await _stop_process(process, cleanup_wait_task)
+            finally:
+                helpers = [task for task in (cleanup_wait_task, output_task) if task is not None]
+                for task in helpers:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*helpers, return_exceptions=True)
+                process_job = _process_jobs.pop(process, None)
+                if process_job is not None:
+                    await asyncio.to_thread(_close_windows_job, process_job)
+                _stopped_process_trees.discard(process)
+
+        cleanup_task = asyncio.create_task(cleanup())
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            await cleanup_task
+            raise
 
 
 async def _worker_loop(store: RunStore, owner_id: str) -> None:
@@ -211,6 +447,10 @@ async def _worker_loop(store: RunStore, owner_id: str) -> None:
             await _execute_claimed(store, run, owner_id)
             continue
         _worker_wakeup.clear()
+        run = await store.claim_next()
+        if run is not None:
+            await _execute_claimed(store, run, owner_id)
+            continue
         try:
             await asyncio.wait_for(_worker_wakeup.wait(), timeout=0.5)
         except TimeoutError:
@@ -287,10 +527,10 @@ async def _child_execute(run_id: str, database: Path) -> None:
         raise RuntimeError('theHarvester run is not executable')
     request = run['request']
     artifact_dir = store.artifact_directory(run_id)
-    ensure_private_directory(artifact_dir)
+    await asyncio.to_thread(ensure_private_directory, artifact_dir)
     screenshot_dir = artifact_dir / 'screenshots'
     if request.get('screenshot'):
-        ensure_private_directory(screenshot_dir)
+        await asyncio.to_thread(ensure_private_directory, screenshot_dir)
     recursive_depth = request.get('dns_recursive_depth', 0)
     resolver_list = request.get('dns_resolvers', list(DEFAULT_DNS_RESOLVERS))
     api_scan_wordlist = ''
@@ -336,8 +576,9 @@ async def _child_execute(run_id: str, database: Path) -> None:
     checkpoint_lock = asyncio.Lock()
 
     async def checkpoint(evidence: CompletedResult) -> None:
+        payload = await asyncio.to_thread(serialize_child_evidence, evidence, partial=True)
         async with checkpoint_lock:
-            write_child_evidence(artifact_dir, evidence, partial=True)
+            await asyncio.to_thread(write_child_evidence_payload, artifact_dir, payload)
 
     task = asyncio.create_task(
         main_module.start(
@@ -366,7 +607,9 @@ async def _child_execute(run_id: str, database: Path) -> None:
     evidence = response[-1]
     if not isinstance(evidence, CompletedResult):
         raise RuntimeError('theHarvester did not return terminal evidence')
-    write_child_evidence(artifact_dir, evidence, partial=False)
+    payload = await asyncio.to_thread(serialize_child_evidence, evidence, partial=False)
+    async with checkpoint_lock:
+        await asyncio.to_thread(write_child_evidence_payload, artifact_dir, payload)
 
 
 if __name__ == '__main__':

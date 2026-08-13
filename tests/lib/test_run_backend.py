@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -544,6 +545,69 @@ def test_orphan_recovery_reattaches_partial_checkpoint_and_leaves_queued_work(tm
     assert {run['target']: run['status'] for run in history}['third.example'] == 'queued'
 
 
+def test_orphan_checkpoint_read_does_not_block_the_event_loop(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_store as run_store_module
+    from theHarvester.lib.api.run_models import RunRequest
+    from theHarvester.lib.api.run_store import RunStore
+
+    heartbeat_ran = threading.Event()
+    heartbeat_seen_before_release: list[bool] = []
+    release_read = threading.Event()
+
+    def blocking_read(*_args):
+        release_read.wait(timeout=1)
+        return None, None
+
+    def release() -> None:
+        heartbeat_seen_before_release.append(heartbeat_ran.is_set())
+        release_read.set()
+
+    monkeypatch.setattr(run_store_module, 'read_child_evidence', blocking_read)
+
+    async def scenario() -> None:
+        store = RunStore(tmp_path / 'runs.sqlite')
+        await store.create(RunRequest(target='example.test', sources=['crtsh']))
+        assert await store.claim_next() is not None
+        timer = threading.Timer(0.2, release)
+        timer.start()
+        try:
+            recover = asyncio.create_task(store.recover_orphans())
+            heartbeat = asyncio.create_task(asyncio.sleep(0))
+            heartbeat.add_done_callback(lambda _task: heartbeat_ran.set())
+            await asyncio.gather(recover, heartbeat)
+        finally:
+            timer.join()
+
+    asyncio.run(scenario())
+
+    assert heartbeat_seen_before_release == [True]
+
+
+def test_concurrent_lifecycle_tasks_use_distinct_async_sessions(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib import database as database_module
+    from theHarvester.lib.database import RunLifecycleStore
+
+    async def scenario() -> tuple[int, int]:
+        lifecycle = RunLifecycleStore(tmp_path / 'runs.sqlite')
+        await lifecycle.initialize()
+        database = database_module._database_for(lifecycle.database)
+        original_sessions = database.sessions
+        tasks = []
+        sessions = []
+
+        def tracking_sessions():
+            session = original_sessions()
+            tasks.append(asyncio.current_task())
+            sessions.append(session)
+            return session
+
+        monkeypatch.setattr(database, 'sessions', tracking_sessions)
+        await asyncio.gather(lifecycle.get('first'), lifecycle.get('second'))
+        return len({id(task) for task in tasks}), len({id(session) for session in sessions})
+
+    assert asyncio.run(scenario()) == (2, 2)
+
+
 def test_orphan_recovery_does_not_attach_same_id_evidence_for_another_target(tmp_path) -> None:
     from theHarvester.lib.api.run_models import RunRequest
     from theHarvester.lib.api.run_store import RunStore
@@ -653,6 +717,929 @@ def test_worker_lease_serializes_execution_owners(tmp_path) -> None:
         return first, second, replacement
 
     assert asyncio.run(scenario()) == (True, False, True)
+
+
+@pytest.mark.parametrize('failure_stage', ['heartbeat', 'database', 'output-reader', 'evidence-read', 'persistence'])
+def test_worker_reaps_child_when_a_helper_stage_fails(tmp_path, monkeypatch, failure_stage) -> None:
+    from theHarvester.lib.api import run_worker
+
+    child = None
+
+    class FailingStore:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def heartbeat_worker_lease(_owner_id):
+            if failure_stage == 'heartbeat':
+                raise RuntimeError('heartbeat failed')
+            return True
+
+        @staticmethod
+        async def get(_run_id):
+            if failure_stage == 'database':
+                raise RuntimeError('database failed')
+            return {'status': 'running'}
+
+        @staticmethod
+        async def fail(*_args, **_kwargs):
+            if failure_stage == 'persistence':
+                raise RuntimeError('persistence failed')
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        nonlocal child
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'import time; time.sleep(60)',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        return child
+
+    async def fail_output(_process):
+        raise RuntimeError('output reader failed')
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+    if failure_stage == 'output-reader':
+        monkeypatch.setattr(run_worker, '_process_output', fail_output)
+    if failure_stage == 'evidence-read':
+        monkeypatch.setattr(
+            run_worker,
+            'read_child_evidence',
+            lambda *_args: (_ for _ in ()).throw(RuntimeError('evidence read failed')),
+        )
+
+    async def scenario() -> None:
+        try:
+            with pytest.raises(RuntimeError, match=failure_stage.split('-')[0]):
+                await asyncio.wait_for(
+                    run_worker._execute_claimed(
+                        FailingStore(),
+                        {
+                            'run_id': 'run-id',
+                            'target': 'example.test',
+                            'request': {'deadline_seconds': 0 if failure_stage in {'evidence-read', 'persistence'} else 60},
+                        },
+                        'worker-id',
+                    ),
+                    timeout=1,
+                )
+            assert child is not None
+            assert child.returncode is not None
+        finally:
+            if child is not None and child.returncode is None:
+                child.kill()
+                await child.wait()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('failure_stage', ['checkpoint', 'terminal'])
+def test_child_serialization_failure_ends_enumeration_task(tmp_path, monkeypatch, failure_stage) -> None:
+    from theHarvester import __main__ as main_module
+    from theHarvester.lib.api import run_worker
+    from theHarvester.lib.api.run_models import RunRequest
+    from theHarvester.lib.api.run_store import RunStore
+    from theHarvester.lib.completed_result import CompletedResult
+
+    enumeration_finished = asyncio.Event()
+
+    async def fake_start(options, *, completed_result_checkpoint, **_kwargs):
+        now = datetime.now(UTC)
+        evidence = CompletedResult.finish(target=options.domain, started_at=now, completed_at=now, groups={})
+        try:
+            if failure_stage == 'checkpoint':
+                await completed_result_checkpoint(evidence)
+            return (evidence,)
+        finally:
+            enumeration_finished.set()
+
+    def fail_serialization(_evidence, *, partial):
+        if partial is (failure_stage == 'checkpoint'):
+            raise RuntimeError(f'{failure_stage} serialization failed')
+        return '{}'
+
+    monkeypatch.setattr(main_module, 'start', fake_start)
+    monkeypatch.setattr(run_worker, 'serialize_child_evidence', fail_serialization)
+
+    async def scenario() -> None:
+        store = RunStore(tmp_path / 'runs.sqlite')
+        created = await store.create(RunRequest(target='example.test', sources=['crtsh']))
+        assert await store.claim_next() is not None
+        with pytest.raises(RuntimeError, match=f'{failure_stage} serialization failed'):
+            await run_worker._child_execute(created['run_id'], store.database)
+        assert enumeration_finished.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_worker_cancellation_reaps_child_and_output_reader(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    child = None
+    child_started = asyncio.Event()
+    output_reader_finished = asyncio.Event()
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            return {'status': 'running'}
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        nonlocal child
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'import time; time.sleep(60)',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        child_started.set()
+        return child
+
+    original_process_output = run_worker._process_output
+
+    async def observe_output(process):
+        try:
+            return await original_process_output(process)
+        finally:
+            output_reader_finished.set()
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_process_output', observe_output)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_worker._execute_claimed(
+                Store(),
+                {'run_id': 'run-id', 'target': 'example.test', 'request': {'deadline_seconds': 60}},
+            )
+        )
+        await child_started.wait()
+        task.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert child.returncode is not None
+            assert output_reader_finished.is_set()
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+    asyncio.run(scenario())
+
+
+def test_worker_caps_each_output_stream_with_an_explicit_marker() -> None:
+    from theHarvester.lib.api import run_worker
+
+    async def scenario() -> str:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'import sys; sys.stdout.write("o" * 120000); sys.stderr.write("e" * 120000)',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        output, _ = await asyncio.gather(run_worker._process_output(process), process.wait())
+        return output
+
+    output = asyncio.run(scenario())
+
+    assert len(output.encode()) <= run_worker.MAX_CAPTURED_OUTPUT_BYTES
+    assert '[stdout truncated:' in output
+    assert '[stderr truncated:' in output
+
+
+def test_worker_caps_decoded_non_utf8_output() -> None:
+    from theHarvester.lib.api import run_worker
+
+    async def scenario() -> str:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'import os; os.write(1, b"\\xff" * 120000); os.write(2, b"\\xfe" * 120000)',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        output, _ = await asyncio.gather(run_worker._process_output(process), process.wait())
+        return output
+
+    output = asyncio.run(scenario())
+
+    assert len(output.encode()) <= run_worker.MAX_CAPTURED_OUTPUT_BYTES
+    assert '[stdout truncated' in output
+    assert '[stderr truncated' in output
+
+
+def test_output_reader_failure_cancels_its_sibling() -> None:
+    from theHarvester.lib.api import run_worker
+
+    sibling_finished = asyncio.Event()
+
+    class FailingReader:
+        @staticmethod
+        async def read(_size):
+            raise RuntimeError('reader failed')
+
+    class WaitingReader:
+        @staticmethod
+        async def read(_size):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                sibling_finished.set()
+
+    async def scenario() -> None:
+        process = type('Process', (), {'stdout': FailingReader(), 'stderr': WaitingReader()})()
+        with pytest.raises(RuntimeError, match='reader failed'):
+            await run_worker._process_output(process)
+        assert sibling_finished.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_worker_bounds_output_reader_after_process_exit(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    output_reader_finished = asyncio.Event()
+    stored_logs = []
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            return {'status': 'running'}
+
+        @staticmethod
+        async def fail(_run_id, _error, log, **_kwargs):
+            stored_logs.append(log)
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'pass',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def stuck_output(_process):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            output_reader_finished.set()
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_process_output', stuck_output)
+    monkeypatch.setattr(run_worker, '_OUTPUT_DRAIN_SECONDS', 0.01)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    async def scenario() -> None:
+        await run_worker._execute_claimed(
+            Store(),
+            {'run_id': 'run-id', 'target': 'example.test', 'request': {'deadline_seconds': 60}},
+        )
+        assert output_reader_finished.is_set()
+        assert stored_logs == ['[child output collection timed out and was truncated]']
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('stop_reason', ['cancellation', 'deadline'])
+def test_early_stop_bounds_held_open_output_reader(tmp_path, monkeypatch, stop_reason) -> None:
+    from theHarvester.lib.api import run_worker
+
+    output_reader_finished = asyncio.Event()
+    failures = []
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            return {'status': 'cancelling' if stop_reason == 'cancellation' else 'running'}
+
+        @staticmethod
+        async def fail(_run_id, error, log, **kwargs):
+            failures.append((error, log, kwargs))
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'import time; time.sleep(60)',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def stuck_output(_process):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            output_reader_finished.set()
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_process_output', stuck_output)
+    monkeypatch.setattr(run_worker, '_OUTPUT_DRAIN_SECONDS', 0.01)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            run_worker._execute_claimed(
+                Store(),
+                {
+                    'run_id': 'run-id',
+                    'target': 'example.test',
+                    'request': {'deadline_seconds': 0 if stop_reason == 'deadline' else 60},
+                },
+            ),
+            timeout=1,
+        )
+        assert output_reader_finished.is_set()
+
+    asyncio.run(scenario())
+
+    assert len(failures) == 1
+    assert failures[0][1] == '[child output collection timed out and was truncated]'
+    assert bool(failures[0][2].get('cancelled')) is (stop_reason == 'cancellation')
+
+
+def test_windows_forced_cleanup_uses_retained_job(monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    terminated = []
+    process = type('Process', (), {'returncode': 0})()
+    run_worker._process_jobs[process] = 42
+    monkeypatch.setattr(run_worker.os, 'name', 'nt')
+    monkeypatch.setattr(run_worker, '_terminate_windows_job', terminated.append)
+
+    asyncio.run(run_worker._signal_process_tree(process, force=True))
+
+    assert terminated == [42]
+    run_worker._process_jobs.pop(process, None)
+
+
+def test_windows_child_is_suspended_until_assigned_to_job(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    calls = []
+
+    class Process:
+        pid = 123
+
+    async def create_process(*_args, **kwargs):
+        calls.append(('create', kwargs['creationflags']))
+        return Process()
+
+    def assign(process_id):
+        calls.append(('assign', process_id))
+        return 42
+
+    def resume(process_id):
+        calls.append(('resume', process_id))
+
+    monkeypatch.setattr(run_worker.os, 'name', 'nt')
+    monkeypatch.setattr(run_worker.asyncio, 'create_subprocess_exec', create_process)
+    monkeypatch.setattr(run_worker, '_assign_windows_job', assign)
+    monkeypatch.setattr(run_worker, '_resume_windows_process', resume)
+
+    process = asyncio.run(run_worker._default_process_factory('run-id', tmp_path / 'runs.sqlite', tmp_path))
+
+    assert calls[0][0] == 'create'
+    assert calls[0][1] & 0x4
+    assert calls[1:] == [('assign', 123), ('resume', 123)]
+    assert run_worker._process_jobs[process] == 42
+    run_worker._process_jobs.pop(process, None)
+
+
+@pytest.mark.parametrize('failure_stage', ['assignment', 'resume'])
+def test_windows_startup_failure_reaps_child_without_masking_original(tmp_path, monkeypatch, failure_stage) -> None:
+    from theHarvester.lib.api import run_worker
+
+    calls = []
+
+    class Process:
+        pid = 123
+        returncode = None
+
+        def kill(self):
+            calls.append('kill')
+
+        async def wait(self):
+            calls.append('wait')
+            self.returncode = 1
+            return 1
+
+    async def create_process(*_args, **_kwargs):
+        return Process()
+
+    def assign(_process_id):
+        calls.append('assign')
+        if failure_stage == 'assignment':
+            raise RuntimeError('assignment failed')
+        return 42
+
+    def resume(_process_id):
+        calls.append('resume')
+        raise RuntimeError('resume failed')
+
+    def terminate(_job):
+        calls.append('terminate')
+        raise OSError('terminate failed')
+
+    def close(_job):
+        calls.append('close')
+        raise OSError('close failed')
+
+    monkeypatch.setattr(run_worker.os, 'name', 'nt')
+    monkeypatch.setattr(run_worker.asyncio, 'create_subprocess_exec', create_process)
+    monkeypatch.setattr(run_worker, '_assign_windows_job', assign)
+    monkeypatch.setattr(run_worker, '_resume_windows_process', resume)
+    monkeypatch.setattr(run_worker, '_terminate_windows_job', terminate)
+    monkeypatch.setattr(run_worker, '_close_windows_job', close)
+
+    with pytest.raises(RuntimeError, match=f'{failure_stage} failed'):
+        asyncio.run(run_worker._default_process_factory('run-id', tmp_path / 'runs.sqlite', tmp_path))
+
+    expected = ['assign']
+    if failure_stage == 'resume':
+        expected += ['resume', 'terminate', 'close']
+    assert calls == [*expected, 'kill', 'wait']
+
+
+@pytest.mark.parametrize('exit_mode', ['normal', 'exception', 'cancel'])
+def test_windows_execution_cleanup_terminates_closes_and_forgets_job(tmp_path, monkeypatch, exit_mode) -> None:
+    from theHarvester.lib.api import run_worker
+
+    process_started = asyncio.Event()
+    process_finished = asyncio.Event()
+    terminated = []
+    closed = []
+
+    class Process:
+        pid = 123
+        returncode = 0 if exit_mode == 'normal' else None
+        stdout = None
+        stderr = None
+
+        async def wait(self):
+            if self.returncode is None:
+                await process_finished.wait()
+            return int(self.returncode or 0)
+
+        def send_signal(self, _signal):
+            self.returncode = -15
+            process_finished.set()
+
+        def kill(self):
+            self.returncode = -9
+            process_finished.set()
+
+    process = Process()
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            if exit_mode == 'exception':
+                raise RuntimeError('database failed')
+            return {'status': 'running'}
+
+        @staticmethod
+        async def finish(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        async def fail(*_args, **_kwargs):
+            return None
+
+    async def process_factory(*_args):
+        run_worker._process_jobs[process] = 42
+        process_started.set()
+        return process
+
+    def terminate(job):
+        terminated.append(job)
+        process.returncode = -9
+        process_finished.set()
+
+    monkeypatch.setattr(run_worker.os, 'name', 'nt')
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_terminate_windows_job', terminate)
+    monkeypatch.setattr(run_worker, '_close_windows_job', closed.append)
+    monkeypatch.setattr(run_worker, 'read_child_evidence', lambda *_args: ({'target': 'example.test'}, None))
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_worker._execute_claimed(
+                Store(),
+                {'run_id': 'run-id', 'target': 'example.test', 'request': {'deadline_seconds': 60}},
+            )
+        )
+        await process_started.wait()
+        if exit_mode == 'cancel':
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif exit_mode == 'exception':
+            with pytest.raises(RuntimeError, match='database failed'):
+                await task
+        else:
+            await task
+
+    asyncio.run(scenario())
+
+    assert terminated == [42]
+    assert closed == [42]
+    assert process not in run_worker._process_jobs
+    assert process not in run_worker._stopped_process_trees
+
+
+def test_windows_runtime_cleanup_reaps_child_when_job_termination_fails(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    process_finished = asyncio.Event()
+    calls = []
+
+    class Process:
+        pid = 123
+        returncode = None
+        stdout = None
+        stderr = None
+
+        async def wait(self):
+            calls.append('wait')
+            await process_finished.wait()
+            calls.append('reaped')
+            return int(self.returncode or 0)
+
+        def send_signal(self, _signal):
+            calls.append('signal')
+            process_finished.set()
+
+        def kill(self):
+            calls.append('kill')
+            self.returncode = -9
+            process_finished.set()
+
+    process = Process()
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            raise RuntimeError('database failed')
+
+        @staticmethod
+        async def fail(*_args, **_kwargs):
+            return None
+
+    async def process_factory(*_args):
+        run_worker._process_jobs[process] = 42
+        return process
+
+    def terminate(_job):
+        calls.append('terminate')
+        raise OSError('job termination failed')
+
+    monkeypatch.setattr(run_worker.os, 'name', 'nt')
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_terminate_windows_job', terminate)
+    monkeypatch.setattr(run_worker, '_close_windows_job', lambda job: calls.append(('close', job)))
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    with pytest.raises(OSError, match='job termination failed'):
+        asyncio.run(
+            run_worker._execute_claimed(
+                Store(),
+                {'run_id': 'run-id', 'target': 'example.test', 'request': {'deadline_seconds': 60}},
+            )
+        )
+
+    assert calls.count('kill') == 1
+    assert calls.count('reaped') == 1
+    assert calls.count(('close', 42)) == 1
+    assert process not in run_worker._process_jobs
+    assert process not in run_worker._stopped_process_trees
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX process-group regression')
+def test_worker_reaps_process_group_when_leader_exits_with_inherited_output(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    grandchild_pid_path = tmp_path / 'grandchild.pid'
+    helper_tasks: list[asyncio.Task] = []
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            return {'status': 'running'}
+
+        @staticmethod
+        async def fail(*_args, **_kwargs):
+            return None
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            (
+                'import pathlib, subprocess, sys; '
+                'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                f'pathlib.Path({str(grandchild_pid_path)!r}).write_text(str(child.pid))'
+            ),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        run_worker._process_groups[process] = process.pid
+        return process
+
+    original_create_task = asyncio.create_task
+
+    def track_task(coroutine):
+        task = original_create_task(coroutine)
+        helper_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker.asyncio, 'create_task', track_task)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            run_worker._execute_claimed(
+                Store(),
+                {'run_id': 'run-id', 'target': 'example.test', 'request': {'deadline_seconds': 60}},
+            ),
+            timeout=5,
+        )
+        grandchild_pid = int(grandchild_pid_path.read_text())
+
+        def grandchild_stopped() -> bool:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(grandchild_pid, 0)
+                except ProcessLookupError:
+                    return True
+                time.sleep(0.01)
+            return False
+
+        assert await asyncio.to_thread(grandchild_stopped)
+        assert all(task.done() for task in helper_tasks)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX process-group regression')
+def test_worker_cancellation_reaps_child_and_grandchild_process_group(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    grandchild_pid_path = tmp_path / 'grandchild.pid'
+    leader = None
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            return {'status': 'running'}
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        nonlocal leader
+        leader = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            (
+                'import pathlib, subprocess, sys, time; '
+                'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
+                f'pathlib.Path({str(grandchild_pid_path)!r}).write_text(str(child.pid)); '
+                'time.sleep(60)'
+            ),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        run_worker._process_groups[leader] = leader.pid
+        return leader
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_worker._execute_claimed(
+                Store(),
+                {'run_id': 'run-id', 'target': 'example.test', 'request': {'deadline_seconds': 60}},
+            )
+        )
+
+        def grandchild_started() -> bool:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if grandchild_pid_path.exists():
+                    return True
+                time.sleep(0.01)
+            return False
+
+        assert await asyncio.to_thread(grandchild_started)
+        grandchild_pid = int(grandchild_pid_path.read_text())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        def process_tree_stopped() -> bool:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(grandchild_pid, 0)
+                except ProcessLookupError:
+                    return leader is not None and leader.returncode is not None
+                time.sleep(0.01)
+            return False
+
+        assert await asyncio.to_thread(process_tree_stopped)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('failure_stage', ['wait', 'finish', 'bookkeeping', 'task-creation'])
+def test_worker_reaps_child_on_remaining_post_spawn_failures(tmp_path, monkeypatch, failure_stage) -> None:
+    from theHarvester.lib.api import run_worker
+
+    child = None
+    original_wait = None
+
+    class Store:
+        database = tmp_path / 'runs.sqlite'
+
+        @staticmethod
+        def artifact_directory(_run_id):
+            return tmp_path / 'artifacts'
+
+        @staticmethod
+        async def get(_run_id):
+            return {'status': 'running'}
+
+        @staticmethod
+        async def finish(*_args, **_kwargs):
+            if failure_stage == 'finish':
+                raise RuntimeError('finish failed')
+
+        @staticmethod
+        async def fail(*_args, **_kwargs):
+            return None
+
+    class BrokenRequest(dict):
+        def __getitem__(self, key):
+            if failure_stage == 'bookkeeping' and key == 'deadline_seconds':
+                raise RuntimeError('bookkeeping failed')
+            return super().__getitem__(key)
+
+    async def process_factory(_run_id, _database, _artifact_dir):
+        nonlocal child, original_wait
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            '-c',
+            'import time; time.sleep(60)' if failure_stage != 'finish' else 'pass',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        original_wait = child.wait
+        if failure_stage == 'wait':
+
+            async def fail_wait():
+                raise RuntimeError('wait failed')
+
+            child.wait = fail_wait
+        return child
+
+    monkeypatch.setattr(run_worker, '_process_factory', process_factory)
+    monkeypatch.setattr(run_worker, '_worker_stop', None)
+    if failure_stage == 'finish':
+        monkeypatch.setattr(run_worker, 'read_child_evidence', lambda *_args: ({'target': 'example.test'}, None))
+    if failure_stage == 'task-creation':
+        original_create_task = asyncio.create_task
+        creation_calls = 0
+
+        def fail_first_task(coroutine):
+            nonlocal creation_calls
+            creation_calls += 1
+            if creation_calls == 1:
+                coroutine.close()
+                raise RuntimeError('task-creation failed')
+            return original_create_task(coroutine)
+
+        monkeypatch.setattr(run_worker.asyncio, 'create_task', fail_first_task)
+
+    async def scenario() -> None:
+        try:
+            with pytest.raises(RuntimeError, match=failure_stage):
+                await asyncio.wait_for(
+                    run_worker._execute_claimed(
+                        Store(),
+                        {
+                            'run_id': 'run-id',
+                            'target': 'example.test',
+                            'request': BrokenRequest(deadline_seconds=60),
+                        },
+                    ),
+                    timeout=2,
+                )
+            assert child is not None
+            if original_wait is not None:
+                await asyncio.wait_for(original_wait(), timeout=1)
+            assert child.returncode is not None
+        finally:
+            if child is not None and child.returncode is None:
+                child.kill()
+                if original_wait is not None:
+                    await original_wait()
+
+    asyncio.run(scenario())
+
+
+def test_worker_rechecks_queue_after_clearing_wakeup(monkeypatch) -> None:
+    from theHarvester.lib.api import run_worker
+
+    claims = 0
+
+    class Store:
+        @staticmethod
+        async def heartbeat_worker_lease(_owner_id):
+            return True
+
+        @staticmethod
+        async def claim_next():
+            nonlocal claims
+            claims += 1
+            if claims == 1:
+                run_worker.wake_worker()
+                return None
+            return {'run_id': 'run-id'}
+
+    async def execute(_store, _run, _owner_id):
+        assert run_worker._worker_stop is not None
+        run_worker._worker_stop.set()
+
+    monkeypatch.setattr(run_worker, '_execute_claimed', execute)
+
+    async def scenario() -> None:
+        run_worker._worker_stop = asyncio.Event()
+        run_worker._worker_wakeup = asyncio.Event()
+        try:
+            await asyncio.wait_for(run_worker._worker_loop(Store(), 'worker-id'), timeout=0.1)
+        finally:
+            run_worker._worker_stop = None
+            run_worker._worker_wakeup = None
+
+    asyncio.run(scenario())
+
+    assert claims == 2
 
 
 def test_submission_fails_closed_when_worker_supervisor_stops(tmp_path, monkeypatch) -> None:
