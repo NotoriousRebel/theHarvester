@@ -432,6 +432,7 @@ class Core:
 
 class AsyncFetcher:
     _proxy_list: ClassVar[dict | None] = None
+    _FETCH_ALL_CONCURRENCY: ClassVar[int] = 20
 
     @property
     def proxy_list(self) -> dict:
@@ -862,97 +863,64 @@ class AsyncFetcher:
         proxy: bool = False,
         include_metadata: bool = False,
     ) -> list:
-        # By default, timeout is 5 minutes; 60 seconds should suffice
-        headers = cls._default_headers(headers)
-        timeout = cls._request_timeout(60)
-        if takeover:
-            async with aiohttp.ClientSession(
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as session:
-                if proxy:
-                    # Get random proxy for each URL
-                    proxy_urls = [cls._get_random_proxy(cls().proxy_list)[0] for _ in urls]
-                    return list(
-                        await asyncio.gather(
-                            *[
-                                AsyncFetcher.takeover_fetch(
-                                    session,
-                                    url,
-                                    proxy=proxy_url,
-                                    headers=headers,
-                                    include_metadata=include_metadata,
-                                )
-                                for url, proxy_url in zip(urls, proxy_urls, strict=False)
-                            ]
-                        )
-                    )
-                else:
-                    return list(
-                        await asyncio.gather(
-                            *[
-                                AsyncFetcher.takeover_fetch(
-                                    session,
-                                    url,
-                                    headers=headers,
-                                    include_metadata=include_metadata,
-                                )
-                                for url in urls
-                            ]
-                        )
-                    )
+        urls = list(urls)
+        if not urls:
+            return []
+        if (
+            isinstance(cls._FETCH_ALL_CONCURRENCY, bool)
+            or not isinstance(cls._FETCH_ALL_CONCURRENCY, int)
+            or cls._FETCH_ALL_CONCURRENCY <= 0
+        ):
+            raise ValueError('fetch_all concurrency must be a positive integer')
 
-        if len(params) == 0:
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                if proxy:
-                    # Get random proxy for each URL (returns tuple of proxy_url and proxy_type)
-                    proxy_data = [cls._get_random_proxy(cls().proxy_list) for _ in urls]
-                    return list(
-                        await asyncio.gather(
-                            *[
-                                AsyncFetcher.fetch(
-                                    session,
-                                    url,
-                                    json=json,
-                                    proxy=proxy_url,
-                                    include_metadata=include_metadata,
-                                )
-                                for url, (proxy_url, proxy_type) in zip(urls, proxy_data, strict=False)
-                            ]
+        headers = cls._default_headers(headers)
+        timeout = aiohttp.ClientTimeout(total=15) if takeover else cls._request_timeout(60)
+        routing = [cls._get_random_proxy(cls().proxy_list) for _ in urls] if proxy else [(None, None)] * len(urls)
+        results: list[Any] = [None] * len(urls)
+        job_indexes = iter(range(len(urls)))
+        request_params = params if len(params) else ''
+
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+
+            async def worker() -> None:
+                for index in job_indexes:
+                    url = urls[index]
+                    proxy_url, proxy_type = routing[index]
+                    if takeover:
+                        results[index] = await cls.takeover_fetch(
+                            session,
+                            url,
+                            proxy=proxy_url,
+                            headers=headers,
+                            include_metadata=include_metadata,
                         )
-                    )
-                else:
-                    return list(
-                        await asyncio.gather(
-                            *[AsyncFetcher.fetch(session, url, json=json, include_metadata=include_metadata) for url in urls]
+                    else:
+                        request_kwargs: dict[str, Any] = {
+                            'json': json,
+                            'proxy': proxy_url or False,
+                            'headers': headers,
+                            'include_metadata': include_metadata,
+                        }
+                        if request_params != '':
+                            request_kwargs['params'] = request_params
+                        if proxy_type == 'socks5':
+                            request_kwargs['request_timeout'] = 60
+                        results[index] = await cls.fetch(
+                            None if proxy_type == 'socks5' else session,
+                            url,
+                            **request_kwargs,
                         )
-                    )
-        else:
-            # Indicates the request has certain params
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                if proxy:
-                    proxy_data = [cls._get_random_proxy(cls().proxy_list) for _ in urls]
-                    return list(
-                        await asyncio.gather(
-                            *[
-                                AsyncFetcher.fetch(
-                                    session,
-                                    url,
-                                    params,
-                                    json,
-                                    proxy=proxy_url,
-                                    include_metadata=include_metadata,
-                                )
-                                for url, (proxy_url, proxy_type) in zip(urls, proxy_data, strict=False)
-                            ]
-                        )
-                    )
-                else:
-                    return list(
-                        await asyncio.gather(
-                            *[AsyncFetcher.fetch(session, url, params, json, include_metadata=include_metadata) for url in urls]
-                        )
-                    )
+
+            worker_count = min(cls._FETCH_ALL_CONCURRENCY, len(urls))
+            workers = [asyncio.create_task(worker(), name=f'fetch-all-{index}') for index in range(worker_count)]
+            try:
+                await asyncio.gather(*workers)
+            finally:
+                for task in workers:
+                    task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+
+        return results
 
 
 def show_default_error_message(engine_name: str, word: str, error) -> None:

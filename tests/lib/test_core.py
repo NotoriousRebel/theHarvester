@@ -934,6 +934,259 @@ async def test_fetch_all_propagates_metadata_opt_in(monkeypatch) -> None:
     assert [result.status for result in results] == [429, 429]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('url_count', 'concurrency'), [(1_000, 3), (2, 20)])
+async def test_fetch_all_bounds_active_and_pending_work(
+    monkeypatch,
+    url_count: int,
+    concurrency: int,
+) -> None:
+    active = 0
+    peak_active = 0
+    peak_pending = 0
+    baseline_tasks = len(asyncio.all_tasks())
+
+    async def fake_fetch(_session, url: str, **_kwargs: Any) -> str:
+        nonlocal active, peak_active, peak_pending
+        active += 1
+        peak_active = max(peak_active, active)
+        peak_pending = max(peak_pending, len(asyncio.all_tasks()) - baseline_tasks)
+        await asyncio.sleep(0)
+        active -= 1
+        return url
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(AsyncFetcher, '_FETCH_ALL_CONCURRENCY', concurrency)
+    monkeypatch.setattr(AsyncFetcher, 'fetch', fake_fetch)
+    urls = [f'https://{index}.example' for index in range(url_count)]
+
+    results = await AsyncFetcher.fetch_all(urls)
+
+    assert results == urls
+    expected_peak = min(url_count, concurrency)
+    assert peak_active <= expected_peak
+    assert peak_pending <= expected_peak
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_empty_input_does_not_open_a_session(monkeypatch) -> None:
+    def reject_session(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError('empty bulk fetch opened a session')
+
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', reject_session)
+
+    assert await AsyncFetcher.fetch_all(iter(())) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('concurrency', [0, -1, True, 1.5])
+async def test_fetch_all_rejects_invalid_internal_concurrency(monkeypatch, concurrency: object) -> None:
+    monkeypatch.setattr(AsyncFetcher, '_FETCH_ALL_CONCURRENCY', concurrency)
+
+    with pytest.raises(ValueError, match='positive integer'):
+        await AsyncFetcher.fetch_all(['https://example.com'])
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_preserves_request_options_and_result_order(monkeypatch) -> None:
+    calls: dict[str, dict[str, Any]] = {}
+    release_first = asyncio.Event()
+
+    async def fake_fetch(session, url: str, **kwargs: Any) -> FetcherResponse:
+        calls[url] = {'session': session, **kwargs}
+        if url.endswith('/first'):
+            await release_first.wait()
+        else:
+            release_first.set()
+        return FetcherResponse(body=url, status=200, headers={})
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(AsyncFetcher, 'fetch', fake_fetch)
+    urls = ['https://example.com/first', 'https://example.com/second']
+    headers = {'Authorization': 'Bearer secret'}
+    params = {'domain': 'example.com'}
+
+    results = await AsyncFetcher.fetch_all(
+        urls,
+        headers=headers,
+        params=params,
+        json=True,
+        include_metadata=True,
+    )
+
+    assert [result.body for result in results] == urls
+    assert set(calls) == set(urls)
+    assert all(call['session'] is DummySession.instances[0] for call in calls.values())
+    assert all(call['params'] == params for call in calls.values())
+    assert all(call['json'] is True for call in calls.values())
+    assert all(call['include_metadata'] is True for call in calls.values())
+    assert DummySession.instances[0].headers == {
+        'Authorization': 'Bearer secret',
+        'User-Agent': Core.get_user_agent(),
+    }
+    assert DummySession.instances[0].closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('proxy_url', 'proxy_type', 'shared_session', 'request_proxy'),
+    [
+        ('http://proxy.example:8080', 'http', True, 'http://proxy.example:8080'),
+        ('socks5://proxy.example:1080', 'socks5', False, None),
+    ],
+)
+async def test_fetch_all_routes_each_generated_url_through_the_selected_proxy(
+    monkeypatch,
+    proxy_url: str,
+    proxy_type: str,
+    shared_session: bool,
+    request_proxy: str | None,
+) -> None:
+    yielded: list[str] = []
+
+    def urls():
+        for url in ('https://one.example', 'https://two.example'):
+            yielded.append(url)
+            yield url
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(core_module.ssl, 'create_default_context', lambda cafile=None: 'ssl-context')
+    monkeypatch.setattr(core_module.certifi, 'where', lambda: '/tmp/cacert.pem')
+    monkeypatch.setattr(AsyncFetcher, '_proxy_list', {proxy_type: [proxy_url]})
+    monkeypatch.setattr(AsyncFetcher, '_get_random_proxy', staticmethod(lambda _proxies: (proxy_url, proxy_type)))
+
+    async def fake_connector(url: str | None, kind: str | None, _ssl_context=None):
+        assert (url, kind) == (proxy_url, proxy_type)
+        return 'socks-connector'
+
+    monkeypatch.setattr(AsyncFetcher, '_create_connector', fake_connector)
+
+    results = await AsyncFetcher.fetch_all(urls(), headers={'X-Test': 'present'}, proxy=True)
+
+    assert yielded == ['https://one.example', 'https://two.example']
+    assert results == ['response-text', 'response-text']
+    request_sessions = [session for session in DummySession.instances if session.requests]
+    assert len(request_sessions) == (1 if shared_session else 2)
+    for session in request_sessions:
+        assert session.headers == {'X-Test': 'present', 'User-Agent': Core.get_user_agent()}
+        assert session.connector == (None if shared_session else 'socks-connector')
+        for _method, _url, kwargs in session.requests:
+            assert kwargs.get('proxy') == request_proxy
+    assert all(session.closed for session in DummySession.instances)
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_passes_the_batch_timeout_to_socks_owned_sessions(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    proxy_url = 'socks5://proxy.example:1080'
+
+    async def fake_fetch(session, _url: str, **kwargs: Any) -> str:
+        assert session is None
+        calls.append(kwargs)
+        return 'response-text'
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(AsyncFetcher, '_proxy_list', {'socks5': [proxy_url]})
+    monkeypatch.setattr(AsyncFetcher, '_get_random_proxy', staticmethod(lambda _proxies: (proxy_url, 'socks5')))
+    monkeypatch.setattr(AsyncFetcher, 'fetch', fake_fetch)
+
+    results = await AsyncFetcher.fetch_all(['https://one.example', 'https://two.example'], proxy=True)
+
+    assert results == ['response-text', 'response-text']
+    assert [call['request_timeout'] for call in calls] == [60, 60]
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_retains_ordinary_request_failure_results_and_closes_session(monkeypatch) -> None:
+    async def fake_request(_session, _method: str, url: str, **_kwargs: Any) -> str:
+        if url.endswith('/timeout'):
+            raise TimeoutError
+        return url
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(AsyncFetcher, '_request', fake_request)
+
+    results = await AsyncFetcher.fetch_all(['https://example.com/ok', 'https://example.com/timeout'])
+
+    assert results == ['https://example.com/ok', '']
+    assert DummySession.instances[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_awaits_siblings_and_closes_session_after_early_failure(monkeypatch) -> None:
+    started = 0
+    active = 0
+    all_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def fake_fetch(_session, url: str, **_kwargs: Any) -> str:
+        nonlocal active, started
+        active += 1
+        started += 1
+        if started == 3:
+            all_started.set()
+        try:
+            await all_started.wait()
+            if url.endswith('/fail'):
+                raise RuntimeError('unexpected failure')
+            await never.wait()
+            return url
+        finally:
+            active -= 1
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(AsyncFetcher, '_FETCH_ALL_CONCURRENCY', 3)
+    monkeypatch.setattr(AsyncFetcher, 'fetch', fake_fetch)
+
+    with pytest.raises(RuntimeError, match='unexpected failure'):
+        await AsyncFetcher.fetch_all(['https://example.com/fail', 'https://example.com/one', 'https://example.com/two'])
+
+    assert active == 0
+    assert DummySession.instances[0].closed is True
+    assert not any(task.get_name().startswith('fetch-all-') for task in asyncio.all_tasks())
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_propagates_parent_cancellation_after_awaiting_workers(monkeypatch) -> None:
+    active = 0
+    all_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def fake_fetch(_session, url: str, **_kwargs: Any) -> str:
+        nonlocal active
+        active += 1
+        if active == 3:
+            all_started.set()
+        try:
+            await never.wait()
+            return url
+        finally:
+            active -= 1
+
+    reset_dummy_sessions()
+    monkeypatch.setattr(core_module.aiohttp, 'ClientSession', DummySession)
+    monkeypatch.setattr(AsyncFetcher, '_FETCH_ALL_CONCURRENCY', 3)
+    monkeypatch.setattr(AsyncFetcher, 'fetch', fake_fetch)
+    bulk_fetch = asyncio.create_task(
+        AsyncFetcher.fetch_all(['https://one.example', 'https://two.example', 'https://three.example'])
+    )
+    await all_started.wait()
+
+    bulk_fetch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await bulk_fetch
+
+    assert active == 0
+    assert DummySession.instances[0].closed is True
+    assert not any(task.get_name().startswith('fetch-all-') for task in asyncio.all_tasks())
+
+
 @pytest.mark.parametrize(
     ('url', 'proxy', 'uses_shared_session'),
     [
