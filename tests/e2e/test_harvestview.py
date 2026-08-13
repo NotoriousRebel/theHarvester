@@ -1181,24 +1181,24 @@ def test_harvestview_can_import_and_analyze_fixture_evidence_through_the_real_ui
             for index, source in enumerate(ordered_sources)
         ],
         'results': [
-                {
-                    'type': result_type,
-                    'value': (
-                        '192.0.2.10'
-                        if result_type == 'ip'
-                        else 'AS64500'
-                        if result_type == 'asn'
-                        else f'{result_type}.example.com'
-                    ),
-                    'sources': [ordered_sources[index]['name']] if index < 3 else [],
-                }
+            {
+                'type': result_type,
+                'value': (
+                    '192.0.2.10' if result_type == 'ip' else 'AS64500' if result_type == 'asn' else f'{result_type}.example.com'
+                ),
+                'sources': [ordered_sources[index]['name']] if index < 3 else [],
+            }
             for index, result_type in enumerate(('hostname', 'ip', 'asn', 'email', 'url', 'framework', 'person', 'language'))
         ]
         + [
             {
                 'type': 'ip',
                 'value': '198.51.100.10',
-            }
+            },
+            {
+                'type': 'credential-exposure',
+                'value': '{"credential_type":"employee","provider":"hudsonrock-v3","url":"https://portal.example.com"}',
+            },
         ],
     }
     evidence_file = tmp_path / 'broad-run.jsonl'
@@ -1235,6 +1235,8 @@ def test_harvestview_can_import_and_analyze_fixture_evidence_through_the_real_ui
     page.locator('#history-search').fill('not-present')
     expect(page.locator('#history-empty')).to_be_visible()
     page.locator('#history-search').fill('')
+    page.get_by_role('button', name='Credential exposures 1').click()
+    expect(page.locator('.tabulator-row:visible')).to_contain_text('hudsonrock-v3')
     page.get_by_role('button', name='IP addresses 2').click()
     expect(page.locator('#route-count')).to_have_text('2')
     value_column = page.locator('.tabulator-col[tabulator-field="value"]')

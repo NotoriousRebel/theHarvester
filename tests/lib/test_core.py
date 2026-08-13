@@ -51,6 +51,7 @@ def test_capabilities_and_explicit_sources_form_a_union() -> None:
         "builtwith",
         "certspotter",
         "gitlab",
+        "hudsonrock",
         "intelx",
         "rocketreach",
         "urlscan",
@@ -738,6 +739,30 @@ async def test_fetch_json_reads_bounded_fragmented_utf8_without_redirects(monkey
                 'ssl': 'ssl-context',
                 'allow_redirects': False,
                 'params': {'asn': '64500'},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_supports_bounded_post_body(monkeypatch) -> None:
+    install_stream_response(monkeypatch, chunks=(b'{"data":[]}',))
+
+    result = await AsyncFetcher.fetch_json(
+        'https://provider.example/search',
+        method='POST',
+        json_body={'domains': ['example.com']},
+    )
+
+    assert result.body == {'data': []}
+    assert DummySession.instances[0].requests == [
+        (
+            'POST',
+            'https://provider.example/search',
+            {
+                'ssl': 'ssl-context',
+                'allow_redirects': False,
+                'json': {'domains': ['example.com']},
             },
         )
     ]

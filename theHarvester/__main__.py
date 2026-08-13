@@ -508,6 +508,7 @@ async def start(
     all_hosts: list = []
     all_ip: list = []
     all_people: list[dict[str, str]] = []
+    all_credential_exposures: list[dict[str, object]] = []
     all_infostealers: list[dict[str, object]] = []
     dnslookup = args.dns_lookup
     dnsserver = args.dns_server  # TODO arg is not used anywhere replace with resolvers wordlist arg dnsresolve
@@ -633,6 +634,10 @@ async def start(
             )
             if collect_hosts
             else (),
+            'credential-exposure': (
+                json.dumps(exposure, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
+                for exposure in all_credential_exposures
+            ),
             'infostealer': (
                 json.dumps(stealer, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for stealer in all_infostealers
             ),
@@ -879,6 +884,14 @@ async def start(
                 results.extend(values)
                 record_source_observations(source, result_type, values)
         if source == 'hudsonrock':
+            get_credential_exposures = getattr(search_engine, 'get_credential_exposures', None)
+            exposures = await get_credential_exposures() if get_credential_exposures is not None else []
+            all_credential_exposures.extend(exposures)
+            record_source_observations(
+                source,
+                'credential-exposure',
+                (json.dumps(exposure, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for exposure in exposures),
+            )
             infostealers = await search_engine.get_infostealers()
             all_infostealers.extend(infostealers)
             record_source_observations(
@@ -1326,6 +1339,10 @@ async def start(
                                 engineitem,
                             )
                         )
+                    except MissingKey as error:
+                        record_missing_credentials(engineitem)
+                        if not args.quiet:
+                            output_logger.info(f'A Missing Key error occurred in Hudson Rock search: {error}')
                     except Exception as e:
                         output_logger.info(f'An exception has occurred in Hudson Rock search: {e}')
 

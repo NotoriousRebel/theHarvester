@@ -192,7 +192,7 @@ Read the **API key** column as follows:
 | `hackertarget` | ✓ | No | ✓ | No | No | No | No | No | Optional |
 | `haveibeenpwned` | No | No | No | No | No | No | ✓ | No | No |
 | `hibpverified` | No | ✓ | No | No | No | No | ✓ | No | ✓ |
-| `hudsonrock` | ✓ | ✓ | ✓ | No | No | No | No | No | No |
+| `hudsonrock` | ✓ | ✓ | No | No | ✓ | No | No | Sanitized credential-exposure evidence; [Hudson Rock v3 domain search](https://docs.hudsonrock.com/docs/domain-search) supports direct authorized retrieval | ✓ |
 | `hunter` | ✓ | ✓ | No | No | No | No | No | No | ✓ |
 | `hunterhow` | ✓ | No | No | No | No | No | No | No | ✓ |
 | `intelx` | ✓ | ✓ | No | No | ✓ | No | No | No | ✓ |
@@ -286,6 +286,8 @@ The JSONL report is finalized after the selected one-shot actions finish. The fi
 ```
 
 JSONL is easy to stream one record at a time. The summary preserves the evidence status, source and action outcomes, and screenshot artifact metadata. Finding lines carry `sources` and, when applicable, `actions`; they inherit their run ID and target from the preceding summary. Hostnames, IP addresses, and URLs use the same `hostname`, `ip`, and `url` result kinds in JSONL, SQLite, the API, and HarvestView. Provenance identifies which source or action produced each finding. Structured result types, including recursive DNS records plus `person`, `infostealer`, `shodan`, and `takeover`, store a JSON object inside the string `value`. Parse those values a second time with `fromjson`.
+
+Hudson Rock emits `credential-exposure` as its primary sanitized evidence. Its JSON-string value can contain provider and provider-record identifiers, the target URL origin and domain, exposure and credential types, credential count, compromise/upload dates, stealer family, sensitive-application labels, a permitted target employee email, and validated nested endpoint context. The adapter's compatible `infostealer` finding is a sanitized projection using legacy field names. Neither newly emitted form includes passwords, cookies, malware paths, or raw provider records; historical imported `infostealer` records retain their released compatibility contract.
 
 Virtual-host observations do not use that string encoding. Each confirmed name remains one `hostname` finding with `actions: ["vhost"]` and a native `observations` array. Several endpoint observations can enrich the same hostname without creating another result kind or count.
 

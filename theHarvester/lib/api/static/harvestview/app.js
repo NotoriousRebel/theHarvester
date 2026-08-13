@@ -4,11 +4,12 @@
   const $ = selector => document.querySelector(selector);
   const $$ = selector => [...document.querySelectorAll(selector)];
   const ROUTE_ORDER = [
-    'hostname', 'ip', 'prefix', 'asn', 'email', 'url', 'person', 'person-link', 'takeover', 'shodan',
+    'hostname', 'ip', 'prefix', 'asn', 'email', 'url', 'credential-exposure', 'person', 'person-link', 'takeover', 'shodan',
     'scope-extension', 'external-relationship', 'other'
   ];
   const ROUTE_LABELS = {
     hostname: 'Hostnames', ip: 'IP addresses', prefix: 'Network prefixes', asn: 'ASNs', email: 'Emails', url: 'URLs',
+    'credential-exposure': 'Credential exposures',
     person: 'People', 'person-link': 'People links', takeover: 'Takeover evidence', shodan: 'Shodan evidence',
     'scope-extension': 'Scope extensions', 'external-relationship': 'External relationships', other: 'Other'
   };

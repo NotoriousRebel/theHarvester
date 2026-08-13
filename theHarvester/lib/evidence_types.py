@@ -6,6 +6,7 @@ ResultKind = Literal[
     'asn',
     'breach',
     'cms',
+    'credential-exposure',
     'dns-recursive-classification',
     'dns-recursive-finding',
     'dns-recursive-summary',

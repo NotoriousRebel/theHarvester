@@ -299,6 +299,7 @@ async def test_all_schedules_each_passive_catalog_source_once_and_reports_result
         'bevigil',
         'builtwith',
         'gitlab',
+        'hudsonrock',
         'intelx',
         'rocketreach',
         'urlscan',

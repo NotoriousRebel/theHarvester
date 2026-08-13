@@ -142,7 +142,7 @@ _SPECS = (
     _spec('hackertarget', ResultRoute.SUBDOMAINS, ResultRoute.IPS, requires_hostname_resolution=False),
     _spec('haveibeenpwned', ResultRoute.BREACHES),
     _spec('hibpverified', ResultRoute.EMAILS, ResultRoute.BREACHES),
-    _spec('hudsonrock', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.IPS),
+    _spec('hudsonrock', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.URLS),
     _spec('hunter', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS),
     _spec('hunterhow', ResultRoute.SUBDOMAINS),
     _spec('intelx', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.URLS),
