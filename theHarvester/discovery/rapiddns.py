@@ -14,7 +14,6 @@ class SearchRapidDns:
         self.word = word
         self.totalhosts: set[str] = set()
         self.totalips: set[str] = set()
-        self.host_ip_pairs: set[tuple[str, str]] = set()
         self.proxy = False
 
     async def do_search(self):
@@ -65,7 +64,6 @@ class SearchRapidDns:
                     except ValueError:
                         continue
                     self.totalips.add(address)
-                    self.host_ip_pairs.add((subdomain, address))
         except Exception as e:
             logger.info(f'RapidDNS error: {e!s}')
 
@@ -78,6 +76,3 @@ class SearchRapidDns:
 
     async def get_ips(self) -> set[str]:
         return self.totalips
-
-    async def get_host_ip_pairs(self) -> set[tuple[str, str]]:
-        return self.host_ip_pairs

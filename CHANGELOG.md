@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expanded offline regression coverage for discovery providers, configuration contracts, logging, output, documentation, workflow policy, and scope boundaries.
 
 ### Removed
+- Removed inert discovery identifiers, their obsolete output paths, and their persistence aliases.
 - Removed the obsolete bundled IP-range and resolver snapshots.
 - Removed the REST API's built-in SlowAPI request limiter and its launcher option without adding a replacement.
 - Removed the duplicate `chaos` source name and module; ProjectDiscovery remains available through `projectdiscovery` with the same dataset and credential.

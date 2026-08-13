@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Hashable, Iterable, Sequence
+from collections.abc import Hashable, Iterable
 from typing import TypeVar
 
 T = TypeVar('T', bound=Hashable)
@@ -58,13 +58,3 @@ def print_section(header: str, items: Iterable[str], separator: str) -> None:
     output_logger.info(separator)
     for item in sorted_unique(items):
         output_logger.info(item)
-
-
-def print_linkedin_people(engines: Sequence[str], people: Sequence[str], separator: str = '---------------------') -> None:
-    if len(people) == 0 and 'linkedin' in engines:
-        output_logger.info('\n[*] No LinkedIn users found.\n\n')
-    elif len(people) >= 1:
-        output_logger.info(f'\n[*] LinkedIn Users found: {len(people)}')
-        output_logger.info(separator)
-        for usr in sorted_unique(people):
-            output_logger.info(usr)

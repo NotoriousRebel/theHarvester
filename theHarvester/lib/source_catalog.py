@@ -90,6 +90,7 @@ class SourceSpec:
     name: str
     routes: frozenset[ResultRoute]
     activity: ActivityClass = ActivityClass.PASSIVE
+    requires_hostname_resolution: bool = True
 
     @property
     def capabilities(self) -> frozenset[str]:
@@ -100,11 +101,13 @@ def _spec(
     name: str,
     *routes: ResultRoute,
     activity: ActivityClass = ActivityClass.PASSIVE,
+    requires_hostname_resolution: bool = True,
 ) -> SourceSpec:
     return SourceSpec(
         name=name,
         routes=frozenset(routes),
         activity=activity,
+        requires_hostname_resolution=requires_hostname_resolution,
     )
 
 
@@ -136,7 +139,7 @@ _SPECS = (
     _spec('fullhunt', ResultRoute.SUBDOMAINS),
     _spec('github-code', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS),
     _spec('gitlab', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.URLS),
-    _spec('hackertarget', ResultRoute.SUBDOMAINS, ResultRoute.IPS),
+    _spec('hackertarget', ResultRoute.SUBDOMAINS, ResultRoute.IPS, requires_hostname_resolution=False),
     _spec('haveibeenpwned', ResultRoute.BREACHES),
     _spec('hibpverified', ResultRoute.EMAILS, ResultRoute.BREACHES),
     _spec('hudsonrock', ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.IPS),
@@ -149,9 +152,15 @@ _SPECS = (
     _spec('netlas', ResultRoute.SUBDOMAINS),
     _spec('onyphe', ResultRoute.SUBDOMAINS, ResultRoute.IPS, ResultRoute.ASNS),
     _spec('otx', ResultRoute.SUBDOMAINS, ResultRoute.IPS),
-    _spec('pentesttools', ResultRoute.SUBDOMAINS, ResultRoute.IPS, activity=ActivityClass.DNS),
+    _spec(
+        'pentesttools',
+        ResultRoute.SUBDOMAINS,
+        ResultRoute.IPS,
+        activity=ActivityClass.DNS,
+        requires_hostname_resolution=False,
+    ),
     _spec('projectdiscovery', ResultRoute.SUBDOMAINS),
-    _spec('rapiddns', ResultRoute.SUBDOMAINS, ResultRoute.IPS),
+    _spec('rapiddns', ResultRoute.SUBDOMAINS, ResultRoute.IPS, requires_hostname_resolution=False),
     _spec('robtex', ResultRoute.IPS),
     _spec('rocketreach', ResultRoute.EMAILS, ResultRoute.URLS),
     _spec('securityTrails', ResultRoute.SUBDOMAINS, ResultRoute.IPS),

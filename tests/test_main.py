@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ElementTree
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
+from typing import ClassVar
 
 import pytest
 
@@ -179,9 +180,6 @@ async def test_virtual_host_action_uses_harvested_hostnames_and_ips(monkeypatch:
 
         async def get_hostnames(self) -> set[str]:
             return {'admin.example.com'}
-
-        async def get_host_ip_pairs(self) -> set[tuple[str, str]]:
-            return {('admin.example.com', '192.0.2.10')}
 
         async def get_ips(self) -> set[str]:
             return {'192.0.2.10'}
@@ -536,7 +534,7 @@ def test_normalize_hosts_for_storage_uses_the_parser_scope(target: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rapiddns_hostnames_honor_explicit_dns_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_rapiddns_hostnames_skip_explicit_dns_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     completed: list[CompletedResult] = []
     output_directory = tmp_path / 'reports.v1'
     output_directory.mkdir()
@@ -561,9 +559,6 @@ async def test_rapiddns_hostnames_honor_explicit_dns_resolution(monkeypatch: pyt
 
         async def get_hostnames(self) -> set[str]:
             return {'api.example.com', 'reported.example.com'}
-
-        async def get_host_ip_pairs(self) -> set[tuple[str, str]]:
-            return {('reported.example.com', '192.0.2.20')}
 
         async def get_ips(self) -> set[str]:
             return {'192.0.2.20'}
@@ -591,12 +586,7 @@ async def test_rapiddns_hostnames_honor_explicit_dns_resolution(monkeypatch: pyt
         async def check(self) -> tuple[list[str], list[str], list[str]]:
             if self.hosts == ['crt.example.com']:
                 return ['crt.example.com:192.0.2.30'], ['crt.example.com'], ['192.0.2.30']
-            assert self.hosts == ['api.example.com']
-            return (
-                ['api.example.com:192.0.2.10', 'reported.example.com:192.0.2.21'],
-                ['api.example.com', 'reported.example.com'],
-                ['192.0.2.10', '192.0.2.21'],
-            )
+            raise AssertionError('RapidDNS must not trigger hostname DNS resolution')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
     monkeypatch.setattr(theharvester_main.rapiddns, 'SearchRapidDns', FakeRapidDNS)
@@ -626,9 +616,7 @@ async def test_rapiddns_hostnames_honor_explicit_dns_resolution(monkeypatch: pyt
     assert ('hostname', 'api.example.com') in completed[0].results
     assert ('hostname', 'crt.example.com') in completed[0].results
     assert ('hostname', 'reported.example.com') in completed[0].results
-    assert ('ip', '192.0.2.10') in completed[0].results
     assert ('ip', '192.0.2.20') in completed[0].results
-    assert ('ip', '192.0.2.21') in completed[0].results
     assert ('ip', '192.0.2.30') in completed[0].results
     assert {execution.source for execution in completed[0].source_executions} == {'crtsh', 'rapiddns'}
     crtsh_execution = next(execution for execution in completed[0].source_executions if execution.source == 'crtsh')
@@ -640,8 +628,6 @@ async def test_rapiddns_hostnames_honor_explicit_dns_resolution(monkeypatch: pyt
     assert dns_execution.error_type == 'TimeoutError'
     assert dns_execution.stop_reason == 'query-errors'
     assert {(observation.kind, observation.value) for observation in dns_execution.observations} == {
-        ('ip', '192.0.2.10'),
-        ('ip', '192.0.2.21'),
         ('ip', '192.0.2.30'),
     }
     assert ('ip', '192.0.2.20') not in {(observation.kind, observation.value) for observation in dns_execution.observations}
@@ -652,14 +638,13 @@ async def test_rapiddns_hostnames_honor_explicit_dns_resolution(monkeypatch: pyt
         ('rapiddns', 'hostname', 'reported.example.com'),
         ('rapiddns', 'ip', '192.0.2.20'),
     }
-    assert 'reported.example.com:192.0.2.21' in json.loads(output_path.with_suffix('.json').read_text())['hosts']
+    assert {'reported.example.com'} <= set(json.loads(output_path.with_suffix('.json').read_text())['hosts'])
     assert output_path.with_suffix('.jsonl').is_file()
     xml_pairs = [
-        (element.findtext('hostname'), element.findtext('ip'))
+        (element.findtext('hostname') or (element.text or '').strip(), element.findtext('ip'))
         for element in ElementTree.parse(output_path.with_suffix('.xml')).getroot().findall('host')
     ]
-    assert xml_pairs.count(('reported.example.com', '192.0.2.20')) == 1
-    assert xml_pairs.count(('reported.example.com', '192.0.2.21')) == 1
+    assert xml_pairs.count(('reported.example.com', None)) == 1
 
 
 @pytest.mark.asyncio
@@ -680,7 +665,7 @@ async def test_dns_brute_utility_persists_action_evidence_before_return(monkeypa
 
     class FakeDnsForce:
         query_error_count = 1
-        query_error_types = {'TimeoutError'}
+        query_error_types: ClassVar[set[str]] = {'TimeoutError'}
 
         def __init__(self, domain: str, nameservers: list[str], verbose: bool) -> None:
             assert domain == 'example.com'
@@ -725,7 +710,7 @@ async def test_dns_brute_query_errors_are_partial_even_without_findings(monkeypa
 
     class EmptyDnsForce:
         query_error_count = 1
-        query_error_types = {'TimeoutError'}
+        query_error_types: ClassVar[set[str]] = {'TimeoutError'}
 
         def __init__(self, *_args, **_kwargs) -> None:
             pass
@@ -768,7 +753,7 @@ async def test_dns_brute_keeps_legacy_json_and_xml_while_persisting_canonical_ev
 
     class FakeDnsForce:
         query_error_count = 0
-        query_error_types: set[str] = set()
+        query_error_types: ClassVar[set[str]] = set()
 
         def __init__(self, *_args, **_kwargs) -> None:
             pass
@@ -968,7 +953,7 @@ async def test_dns_resolve_query_errors_are_partial_even_without_findings(monkey
 
     class EmptyChecker:
         query_error_count = 1
-        query_error_types = {'TimeoutError'}
+        query_error_types: ClassVar[set[str]] = {'TimeoutError'}
 
         def __init__(self, hosts: list[str], _nameservers: list[str]) -> None:
             assert hosts == ['api.example.com']

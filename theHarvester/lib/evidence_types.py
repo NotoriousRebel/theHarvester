@@ -15,7 +15,6 @@ ResultKind = Literal[
     'infostealer',
     'ip',
     'language',
-    'linkedin-person',
     'person',
     'prefix',
     'server',

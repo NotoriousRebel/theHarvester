@@ -77,8 +77,6 @@ _LEGACY_RESULT_KIND_RENAMES = {
     'interesting-url': 'url',
     'interestingurls': 'url',
     'ip-address': 'ip',
-    'linkedin-link': 'url',
-    'linkedinlinks': 'url',
     'vhost': 'hostname',
 }
 

@@ -213,7 +213,6 @@ def _asn_attribution_jsonl_result() -> str:
         ('api-endpoint', {}),
         ('interesting-url', {}),
         ('ip-address', {}),
-        ('linkedin-link', {}),
         ('subdomain', {}),
         ('vhost', {}),
         ('hostname', {'dns_status': 'made-up-status'}),

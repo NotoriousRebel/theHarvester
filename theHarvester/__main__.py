@@ -108,7 +108,7 @@ from theHarvester.lib.enumeration import (
     EnumerationOptions,
 )
 from theHarvester.lib.hostnames import normalize_scoped_hostname
-from theHarvester.lib.output import configure_logging, output_logger, print_linkedin_people, print_section, sorted_unique
+from theHarvester.lib.output import configure_logging, output_logger, print_section, sorted_unique
 from theHarvester.lib.recursive_dns import (
     DEFAULT_RECURSIVE_DNS_QUERY_LIMIT,
     RecursiveDNSLimits,
@@ -564,7 +564,6 @@ async def start(
             pass
     takeover_status = args.take_over
     use_proxy = args.proxies
-    linkedin_people_list_tracker: list = []
     twitter_people_list_tracker: list = []
     total_asns: list = []
     all_breaches: list[str] = []
@@ -579,7 +578,6 @@ async def start(
     screenshot_ip_addresses: set[str] = set()
     shodan_evidence: list[str] = []
     takeover_results: dict[str, list[dict[str, str]]] = {}
-    linkedin_people_list_tracker = []
     twitter_people_list_tracker = []
     total_asns = []
     source_executions: list[SourceExecution] = []
@@ -640,7 +638,6 @@ async def start(
             ),
             'ip': _normalize_ip_addresses(all_ip) | screenshot_ip_addresses,
             'language': map(str, all_languages),
-            'linkedin-person': map(str, linkedin_people_list_tracker),
             'person': (json.dumps(person, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for person in all_people),
             'prefix': network_prefixes,
             'server': map(str, all_servers),
@@ -794,23 +791,12 @@ async def start(
         if collect_hosts and ResultRoute.SUBDOMAINS in routes:
             discovered_hosts = await search_engine.get_hostnames()
             host_names = list(_normalize_hosts_for_storage(discovered_hosts, word))
-            paired_hosts: set[str] = set()
-            if source == 'rapiddns':
-                for host, address in await search_engine.get_host_ip_pairs():
-                    normalized = normalize_scoped_hostname(host, word)
-                    if normalized and normalized in host_names:
-                        paired_hosts.add(normalized)
-                        reported_host_ip_pairs.add((normalized, address))
-
-            if source != 'hackertarget' and source != 'pentesttools':
-                # If a source is inside this conditional, it means the hosts returned must be resolved to obtain ip
-                # This should only be checked if --dns-resolve has a wordlist
-                hosts_to_resolve = [host for host in host_names if host not in paired_hosts]
-                if dnsresolve != '' and hosts_to_resolve:
+            if source_spec.requires_hostname_resolution:
+                if dnsresolve != '' and host_names:
                     # indicates that -r was passed in if dnsresolve is None
                     dns_resolution_started = time.perf_counter()
                     try:
-                        full_hosts_checker = hostchecker.Checker(hosts_to_resolve, final_dns_resolver_list)
+                        full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
                         # If full, this is only getting resolved hosts
                         (
                             resolved_pair,
@@ -832,8 +818,6 @@ async def start(
                     dns_resolution_ips.update(_normalize_ip_addresses(temp_ips))
                     all_ip.extend(temp_ips)
                     full.extend(resolved_pair)
-                    if source == 'rapiddns':
-                        full.extend(host for host in host_names if host not in resolved_hosts)
                     resolved_screenshot_hosts.update(resolved_hosts)
                 else:
                     full.extend(host_names)
@@ -2093,7 +2077,7 @@ async def start(
             total_asns,
             list[str](),
             twitter_people_list_tracker,
-            linkedin_people_list_tracker,
+            list[str](),
             list[str](),
             all_urls,
             all_ip,
@@ -2128,9 +2112,6 @@ async def start(
             '---------------------',
         )
         twitter_people_list_tracker = sorted_unique(twitter_people_list_tracker)
-
-    print_linkedin_people(engines, linkedin_people_list_tracker)
-    linkedin_people_list_tracker = sorted_unique(linkedin_people_list_tracker)
 
     length_urls = len(all_urls)
     if length_urls == 0:
@@ -3144,9 +3125,6 @@ async def start(
             if len(twitter_people_list_tracker) > 0:
                 json_dict['twitter_people'] = twitter_people_list_tracker
 
-            if len(linkedin_people_list_tracker) > 0:
-                json_dict['linkedin_people'] = linkedin_people_list_tracker
-
             if len(all_people) > 0:
                 json_dict['people'] = all_people
 
@@ -3181,7 +3159,7 @@ async def start(
             total_asns,
             list[str](),
             twitter_people_list_tracker,
-            linkedin_people_list_tracker,
+            list[str](),
             list[str](),
             all_urls,
             all_ip,

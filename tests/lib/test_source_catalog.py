@@ -55,6 +55,21 @@ def test_unsupported_duckduckgo_source_is_not_selectable() -> None:
     assert 'duckduckgo' not in _scheduled_source_names()
 
 
+def test_removed_inert_sources_are_not_supported() -> None:
+    removed = {'linkedin', 'netcraft', 'omnisint', 'sublist3r', 'zoomeyeapi'}
+
+    assert not removed & set(Core.get_supportedengines())
+    assert not removed & set(SOURCE_SPECS)
+    assert not removed & set(_scheduled_source_names())
+
+
+def test_catalog_declares_hostname_resolution_policy() -> None:
+    assert not SOURCE_SPECS['rapiddns'].requires_hostname_resolution
+    assert not SOURCE_SPECS['hackertarget'].requires_hostname_resolution
+    assert not SOURCE_SPECS['pentesttools'].requires_hostname_resolution
+    assert SOURCE_SPECS['crtsh'].requires_hostname_resolution
+
+
 def test_subdomain_route_drives_subdomain_capability() -> None:
     spec = SourceSpec(
         name='example',
@@ -65,9 +80,7 @@ def test_subdomain_route_drives_subdomain_capability() -> None:
 
 
 def test_source_specs_describe_consolidated_routes_not_getter_presence() -> None:
-    assert SOURCE_SPECS['apis-guru'].routes == frozenset(
-        {ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.URLS}
-    )
+    assert SOURCE_SPECS['apis-guru'].routes == frozenset({ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.URLS})
     assert SOURCE_SPECS['gitlab'].routes == frozenset({ResultRoute.SUBDOMAINS, ResultRoute.EMAILS, ResultRoute.URLS})
     assert SOURCE_SPECS['sourcegraph'].routes == frozenset({ResultRoute.SUBDOMAINS})
     assert SOURCE_SPECS['haveibeenpwned'].routes == frozenset({ResultRoute.BREACHES})

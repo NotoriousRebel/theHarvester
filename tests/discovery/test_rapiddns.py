@@ -31,7 +31,7 @@ async def fake_fetch_all(_urls: list[str], **_kwargs: Any) -> list[FetcherRespon
 
 
 @pytest.mark.asyncio
-async def test_rapiddns_separates_hostnames_ips_and_associations(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_rapiddns_separates_hostnames_and_ips(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rapiddns.AsyncFetcher, 'fetch_all', fake_fetch_all)
     search = rapiddns.SearchRapidDns('example.com')
 
@@ -45,7 +45,6 @@ async def test_rapiddns_separates_hostnames_ips_and_associations(monkeypatch: py
         'broken.example.com',
     }
     assert await search.get_ips() == {'192.0.2.1'}
-    assert await search.get_host_ip_pairs() == {('api.example.com', '192.0.2.1')}
 
 
 @pytest.mark.asyncio
@@ -64,7 +63,6 @@ async def test_rapiddns_handles_empty_or_malformed_html(
 
     assert await search.get_hostnames() == []
     assert await search.get_ips() == set()
-    assert await search.get_host_ip_pairs() == set()
 
 
 @pytest.mark.asyncio
@@ -299,7 +297,7 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
     }
     assert xml_hosts == {
         ('alias.example.com', None),
-        ('api.example.com', '192.0.2.1'),
+        ('api.example.com', None),
         ('broken.example.com', None),
         ('reverse.example.com', None),
     }
