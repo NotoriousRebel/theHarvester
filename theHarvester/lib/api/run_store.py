@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -402,7 +403,7 @@ class RunStore:
         for record in await self.lifecycle.running():
             run_id = str(record['run_id'])
             target = str(record['target'])
-            evidence, evidence_error = read_child_evidence(self.artifact_directory(run_id), target)
+            evidence, evidence_error = await asyncio.to_thread(read_child_evidence, self.artifact_directory(run_id), target)
             error = 'theHarvester restarted before child completion'
             if evidence_error:
                 error += f'; {evidence_error}'

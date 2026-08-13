@@ -56,11 +56,19 @@ def read_child_evidence(
 
 
 def write_child_evidence(artifact_dir: Path, evidence: Any, *, partial: bool) -> None:
+    write_child_evidence_payload(artifact_dir, serialize_child_evidence(evidence, partial=partial))
+
+
+def serialize_child_evidence(evidence: Any, *, partial: bool) -> str:
     payload = evidence.evidence_dict()
     if partial:
         payload['status'] = 'partial'
+    return json.dumps(payload)
+
+
+def write_child_evidence_payload(artifact_dir: Path, payload: str) -> None:
     temporary = artifact_dir / 'evidence.json.tmp'
-    temporary.write_text(json.dumps(payload), encoding='utf-8')
+    temporary.write_text(payload, encoding='utf-8')
     temporary.chmod(0o600)
     evidence_path = artifact_dir / 'evidence.json'
     temporary.replace(evidence_path)
