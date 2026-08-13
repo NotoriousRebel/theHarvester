@@ -189,6 +189,11 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
+def _deprecated_api_wordlist(value: str) -> str:
+    output_logger.warning('-w and --wordlist are deprecated; use --api-wordlist. They are supported for this release only.')
+    return value
+
+
 async def start(
     rest_args: argparse.Namespace | EnumerationOptions | None = None,
     *,
@@ -337,7 +342,21 @@ async def start(
         default='',
         type=str,
     )
-    parser.add_argument('-w', '--wordlist', help='Path to the endpoint wordlist used by --api-scan.', default='')
+    parser.add_argument(
+        '--api-wordlist',
+        dest='wordlist',
+        help='Path to a custom API endpoint wordlist used only by --api-scan.',
+        default='',
+        metavar='FILE',
+    )
+    parser.add_argument(
+        '-w',
+        '--wordlist',
+        dest='wordlist',
+        help='Deprecated aliases for --api-wordlist; supported for this release only.',
+        type=_deprecated_api_wordlist,
+        metavar='FILE',
+    )
     parser.add_argument(
         '-a',
         '--api-scan',
