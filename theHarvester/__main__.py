@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import hashlib
-import inspect
 import json
 import logging
 import os
@@ -26,7 +25,6 @@ from aiomultiprocess import Pool
 
 from theHarvester.discovery import (
     api_endpoints,
-    apisguru,
     arquivo,
     baidusearch,
     bevigil,
@@ -72,7 +70,6 @@ from theHarvester.discovery import (
     shodan_internetdb,
     shodanct,
     shodansearch,
-    sourcegraph,
     subdomaincenter,
     subdomainfinderc99,
     takeover,
@@ -125,6 +122,7 @@ from theHarvester.lib.source_catalog import (
     get_source_spec,
     hostname_collection_conflicts,
 )
+from theHarvester.lib.source_runner import SOURCE_WORKERS, SourceJob, SourceOutcome, SourceRequest, run_source_jobs
 from theHarvester.lib.virtual_host import (
     DEFAULT_VHOST_CONCURRENCY,
     DEFAULT_VHOST_REQUEST_LIMIT,
@@ -900,7 +898,7 @@ async def start(
                 (json.dumps(stealer, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for stealer in infostealers),
             )
 
-    async def store(search_engine: Any, source: str) -> None:
+    async def run_legacy_source(search_engine: Any, source: str) -> None:
         source_spec = get_source_spec(source)
         source_name = source_spec.name
         source_observations: set[ResultObservation] = set()
@@ -965,7 +963,88 @@ async def start(
             f'status={execution_status}; results={result_count}{stop_summary}'
         )
 
-    stor_lst = []
+    def store(search_engine: Any, source: str) -> tuple[Any, str]:
+        return search_engine, source
+
+    def commit_source_outcome(outcome: SourceOutcome) -> None:
+        source_executions.append(outcome.execution)
+        observations.update((*outcome.observations, *outcome.credential_exposures))
+        asn_attributions.extend(outcome.asn_attributions)
+        all_credential_exposures.extend(json.loads(item.value) for item in outcome.credential_exposures)
+        for observation in outcome.observations:
+            if observation.kind == 'hostname':
+                all_hosts.append(observation.value)
+            elif observation.kind == 'email':
+                all_emails.append(observation.value)
+            elif observation.kind == 'ip':
+                all_ip.append(observation.value)
+            elif observation.kind == 'asn':
+                total_asns.append(observation.value)
+            elif observation.kind == 'breach':
+                all_breaches.append(observation.value)
+            elif observation.kind == 'person':
+                all_people.append(json.loads(observation.value))
+            elif observation.kind == 'url':
+                all_urls.append(observation.value)
+            elif observation.kind == 'framework':
+                all_frameworks.append(observation.value)
+            elif observation.kind == 'language':
+                all_languages.append(observation.value)
+            elif observation.kind == 'server':
+                all_servers.append(observation.value)
+            elif observation.kind == 'cms':
+                all_cms.append(observation.value)
+            elif observation.kind == 'analytics':
+                all_analytics.append(observation.value)
+            elif observation.kind == 'infostealer':
+                all_infostealers.append(json.loads(observation.value))
+
+    async def resolve_source_outcome_hostnames(outcome: SourceOutcome) -> None:
+        nonlocal dns_resolution_cancelled, dns_resolution_completed_count
+        nonlocal dns_resolution_duration_ms, dns_resolution_query_error_count
+
+        host_names = [item.value for item in outcome.observations if item.kind == 'hostname']
+        if not host_names:
+            return
+        if not get_source_spec(outcome.execution.source).requires_hostname_resolution or dnsresolve == '':
+            full.extend(host_names)
+            return
+        dns_resolution_started = time.perf_counter()
+        try:
+            full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
+            resolved_pair, resolved_hosts, temp_ips = await full_hosts_checker.check()
+        except asyncio.CancelledError:
+            dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
+            dns_resolution_cancelled = True
+            raise
+        except Exception as error:
+            dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
+            dns_resolution_failure_types.add(type(error).__name__)
+            output_logger.info(
+                f'\n An error occurred while resolving {outcome.execution.source} hostnames: {type(error).__name__}: {error}\n'
+            )
+            return
+        dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
+        dns_resolution_completed_count += 1
+        dns_resolution_query_error_count += getattr(full_hosts_checker, 'query_error_count', 0)
+        dns_resolution_error_types.update(getattr(full_hosts_checker, 'query_error_types', set()))
+        dns_resolution_ips.update(_normalize_ip_addresses(temp_ips))
+        all_ip.extend(temp_ips)
+        full.extend(resolved_pair)
+        resolved_screenshot_hosts.update(resolved_hosts)
+
+    async def finish_source_outcome(outcome: SourceOutcome) -> None:
+        try:
+            await resolve_source_outcome_hostnames(outcome)
+            await checkpoint_completed_result(committed_sources_only=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            output_logger.info(
+                f'\n An error occurred while committing {outcome.execution.source}: {type(error).__name__}: {error}\n'
+            )
+
+    stor_lst: list[SourceJob | tuple[Any, str]] = []
     if args.source is not None:
         engines = Core.expand_source_selection(args.source)
         if not collect_hosts:
@@ -1022,11 +1101,7 @@ async def start(
 
             for engineitem in engines:
                 if engineitem == 'apis-guru':
-                    try:
-                        apis_guru_search = apisguru.SearchApisGuru(word, limit)
-                        stor_lst.append(store(apis_guru_search, engineitem))
-                    except Exception as e:
-                        show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'arquivo':
                     try:
@@ -1659,8 +1734,7 @@ async def start(
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'sourcegraph':
-                    sourcegraph_search = sourcegraph.SearchSourcegraph(word, limit)
-                    stor_lst.append(store(sourcegraph_search, engineitem))
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'subdomaincenter':
                     try:
@@ -1846,56 +1920,58 @@ async def start(
             output_logger.info('\n[!] Invalid source.\n')
             sys.exit(1)
 
-    async def worker(queue):
-        while True:
-            # Get a "work item" out of the queue.
-            stor = await queue.get()
+    async def handler(jobs: list[SourceJob | tuple[Any, str]]) -> tuple[SourceOutcome, ...]:
+        source_jobs = tuple(job for job in jobs if isinstance(job, SourceJob))
+        legacy_jobs = tuple(job for job in jobs if not isinstance(job, SourceJob))
+        semaphore = asyncio.Semaphore(SOURCE_WORKERS)
+        runner_outcomes: tuple[SourceOutcome, ...] = ()
+        tasks: list[asyncio.Task[None]] = []
+        primary_cancellation: asyncio.CancelledError | None = None
+
+        def cancel_sibling_tasks(error: asyncio.CancelledError) -> None:
+            nonlocal primary_cancellation
+            if primary_cancellation is None:
+                primary_cancellation = error
+            current_task = asyncio.current_task()
+            for task in tasks:
+                if task is not current_task and not task.done():
+                    task.cancel()
+
+        async def run_new_sources() -> None:
+            nonlocal runner_outcomes
             try:
-                await stor
+                runner_outcomes = await run_source_jobs(
+                    source_jobs,
+                    commit=commit_source_outcome,
+                    after_commit=finish_source_outcome,
+                    semaphore=semaphore,
+                )
+            except asyncio.CancelledError as error:
+                cancel_sibling_tasks(error)
+                raise
+
+        async def run_legacy_job(job: tuple[Any, str]) -> None:
+            try:
+                async with semaphore:
+                    await run_legacy_source(*job)
+            except asyncio.CancelledError as error:
+                cancel_sibling_tasks(error)
+                raise
             except Exception as work_item_error:
                 output_logger.info(
                     f'\n An error occurred while processing a "work item": {type(work_item_error).__name__}: {work_item_error}\n'
                 )
-            finally:
-                # Notify the queue that the "work item" has been processed.
-                queue.task_done()
 
-    async def handler(lst):
-        queue: asyncio.Queue[Awaitable[Any]] = asyncio.Queue()
-        for stor_method in lst:
-            # enqueue the coroutines
-            queue.put_nowait(stor_method)
-        # Create three worker tasks to process the queue concurrently.
-        tasks = []
-        for _i in range(3):
-            task = asyncio.create_task(worker(queue))
-            tasks.append(task)
-
-        join_task = asyncio.create_task(queue.join())
-        try:
-            done, _pending = await asyncio.wait((join_task, *tasks), return_when=asyncio.FIRST_COMPLETED)
-            finished_workers = [task for task in tasks if task in done]
-            if any(task.cancelled() for task in finished_workers):
-                raise asyncio.CancelledError
-            for task in finished_workers:
-                if error := task.exception():
-                    raise error
-            if finished_workers:
-                raise RuntimeError('A source worker stopped before the queue was drained')
-            await join_task
-        finally:
-            join_task.cancel()
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(join_task, *tasks, return_exceptions=True)
-            while not queue.empty():
-                pending_work = queue.get_nowait()
-                if inspect.iscoroutine(pending_work):
-                    pending_work.close()
-                queue.task_done()
+        async with asyncio.TaskGroup() as group:
+            if source_jobs:
+                tasks.append(group.create_task(run_new_sources(), name='source-runner'))
+            tasks.extend(group.create_task(run_legacy_job(job), name=f'source:{job[1]}') for job in legacy_jobs)
+        if primary_cancellation is not None:
+            raise primary_cancellation
+        return runner_outcomes
 
     try:
-        await handler(lst=stor_lst)
+        await handler(stor_lst)
     except asyncio.CancelledError:
         record_dns_resolution_execution(handler_cancelled=True)
         await checkpoint_completed_result(committed_sources_only=True)

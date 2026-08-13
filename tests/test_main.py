@@ -12,6 +12,7 @@ import pytest
 
 from theHarvester import __main__ as theharvester_main
 from theHarvester.discovery.constants import MissingKey
+from theHarvester.lib import source_runner
 from theHarvester.lib.asn_attribution import AsnAttributionObservation
 from theHarvester.lib.completed_result import CompletedResult, ResultObservation
 from theHarvester.lib.dns_consensus import Addressability
@@ -1324,6 +1325,84 @@ async def test_source_checkpoint_excludes_other_source_work_in_progress(monkeypa
         'committed.example.com',
         'early.example.com',
     }
+
+
+@pytest.mark.asyncio
+async def test_migrated_source_dns_and_checkpoint_remain_inside_each_source_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    both_dns_started = asyncio.Event()
+    first_checkpoint = asyncio.Event()
+    dns_started: list[str] = []
+    checkpoint_count = 0
+
+    class FakeApisGuru:
+        def __init__(self, _target: str, _limit: int) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'api.example.test'}
+
+        async def get_emails(self) -> set[str]:
+            return set()
+
+        async def get_urls(self) -> set[str]:
+            return set()
+
+    class FakeSourcegraph:
+        def __init__(self, _target: str, _limit: int) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'code.example.test'}
+
+    class CoordinatedChecker:
+        def __init__(self, hosts: list[str], _nameservers: list[str]) -> None:
+            self.host = hosts[0]
+
+        async def check(self) -> tuple[list[str], list[str], list[str]]:
+            dns_started.append(self.host)
+            if len(dns_started) == 2:
+                both_dns_started.set()
+            await both_dns_started.wait()
+            if self.host == 'code.example.test':
+                await first_checkpoint.wait()
+            address = '192.0.2.10' if self.host == 'api.example.test' else '192.0.2.11'
+            return ([f'{self.host}:{address}'], [self.host], [address])
+
+    async def checkpoint(_result: CompletedResult) -> None:
+        nonlocal checkpoint_count
+        checkpoint_count += 1
+        first_checkpoint.set()
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(source_runner.apisguru, 'SearchApisGuru', FakeApisGuru)
+    monkeypatch.setattr(source_runner.sourcegraph, 'SearchSourcegraph', FakeSourcegraph)
+    monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', CoordinatedChecker)
+
+    response = await asyncio.wait_for(
+        theharvester_main.start(
+            EnumerationOptions(
+                domain='example.test',
+                source='apis-guru,sourcegraph',
+                dns_resolve='192.0.2.53',
+                quiet=True,
+            ),
+            completed_result_checkpoint=checkpoint,
+            return_completed_result=True,
+        ),
+        timeout=1,
+    )
+
+    assert set(dns_started) == {'api.example.test', 'code.example.test'}
+    assert checkpoint_count >= 2
+    assert {execution.source for execution in response[-1].source_executions} == {'apis-guru', 'sourcegraph'}
 
 
 @pytest.mark.asyncio
