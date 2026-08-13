@@ -16,7 +16,7 @@ from theHarvester import __main__ as theharvester_main
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import source_runner
 from theHarvester.lib.asn_attribution import AsnAttributionObservation
-from theHarvester.lib.completed_result import CompletedResult, ResultObservation
+from theHarvester.lib.completed_result import CompletedResult, ResultObservation, SourceExecution
 from theHarvester.lib.dns_consensus import Addressability
 from theHarvester.lib.enumeration import EnumerationOptions
 from theHarvester.lib.hostchecker import HostDnsRecords
@@ -1247,6 +1247,9 @@ async def test_dns_lookup_cancels_sibling_ranges_and_persists_partial_evidence(
     [
         ('projectdiscovery', theharvester_main.projectdiscovery, 'SearchDiscovery'),
         ('bevigil', theharvester_main.bevigil, 'SearchBeVigil'),
+        ('builtwith', source_runner.builtwith, 'SearchBuiltWith'),
+        ('hudsonrock', source_runner.hudsonrocksearch, 'SearchHudsonRock'),
+        ('shodan', source_runner.shodansearch, 'SearchShodan'),
     ],
 )
 @pytest.mark.asyncio
@@ -1290,6 +1293,158 @@ async def test_constructor_missing_credentials_are_persisted_as_skipped_source(
     assert execution.stop_reason == 'missing-credentials'
 
 
+@pytest.mark.parametrize(
+    ('source', 'module', 'constructor_name'),
+    [
+        ('builtwith', source_runner.builtwith, 'SearchBuiltWith'),
+        ('hudsonrock', source_runner.hudsonrocksearch, 'SearchHudsonRock'),
+        ('shodan', source_runner.shodansearch, 'SearchShodan'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_special_source_constructor_failure_uses_runner_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    module: ModuleType,
+    constructor_name: str,
+) -> None:
+    class BrokenSource:
+        def __init__(self, _word: str) -> None:
+            raise RuntimeError('construction failed')
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(module, constructor_name, BrokenSource)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(domain='example.test', source=source, quiet=True),
+        return_completed_result=True,
+    )
+
+    completed = response[-1]
+    assert isinstance(completed, CompletedResult)
+    assert completed.source_executions == (
+        SourceExecution(source, 'failed', completed.source_executions[0].duration_ms, 0, 'RuntimeError'),
+    )
+
+
+@pytest.mark.parametrize(
+    ('source', 'module', 'constructor_name', 'expected_results'),
+    [
+        (
+            'builtwith',
+            source_runner.builtwith,
+            'SearchBuiltWith',
+            {
+                ('analytics', 'Plausible'),
+                ('cms', 'Wagtail'),
+                ('framework', 'Django'),
+                ('hostname', 'partial.example.test'),
+                ('language', 'Python'),
+                ('server', 'nginx'),
+                ('url', 'https://partial.example.test'),
+            },
+        ),
+        (
+            'hudsonrock',
+            source_runner.hudsonrocksearch,
+            'SearchHudsonRock',
+            {
+                (
+                    'credential-exposure',
+                    '{"exposure_category":"employee","provider":"hudsonrock-v3","url":"https://partial.example.test"}',
+                ),
+                ('email', 'user@example.test'),
+                ('hostname', 'partial.example.test'),
+                ('infostealer', '{"email":"user@example.test"}'),
+                ('url', 'https://partial.example.test'),
+            },
+        ),
+        ('shodan', source_runner.shodansearch, 'SearchShodan', {('hostname', 'partial.example.test')}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_special_source_cancellation_retains_partial_evidence_and_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    module: ModuleType,
+    constructor_name: str,
+    expected_results: set[tuple[str, str]],
+) -> None:
+    cancellation = asyncio.CancelledError(f'cancel {source}')
+    saved_results: list[CompletedResult] = []
+
+    class RecordingResultStore(_NoopResultStore):
+        async def save_run(self, result: CompletedResult) -> None:
+            saved_results.append(result)
+
+    class CancellingSource:
+        def __init__(self, _word: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            raise cancellation
+
+        async def get_hostnames(self) -> set[str]:
+            return {'partial.example.test'}
+
+        async def get_emails(self) -> set[str]:
+            return {'user@example.test'}
+
+        async def get_urls(self) -> set[str]:
+            return {'https://partial.example.test'}
+
+        async def get_frameworks(self) -> set[str]:
+            return {'Django'}
+
+        async def get_languages(self) -> set[str]:
+            return {'Python'}
+
+        async def get_servers(self) -> set[str]:
+            return {'nginx'}
+
+        async def get_cms(self) -> set[str]:
+            return {'Wagtail'}
+
+        async def get_analytics(self) -> set[str]:
+            return {'Plausible'}
+
+        async def get_credential_exposures(self) -> list[dict[str, str]]:
+            return [
+                {
+                    'exposure_category': 'employee',
+                    'provider': 'hudsonrock-v3',
+                    'url': 'https://partial.example.test',
+                }
+            ]
+
+        async def get_infostealers(self) -> list[dict[str, str]]:
+            return [{'email': 'user@example.test'}]
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', RecordingResultStore)
+    monkeypatch.setattr(module, constructor_name, CancellingSource)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await theharvester_main.start(
+            EnumerationOptions(domain='example.test', source=source, quiet=True),
+            persist_completed_result=True,
+        )
+
+    assert raised.value is cancellation
+    assert len(saved_results) == 1
+    assert set(saved_results[0].results) == expected_results
+    assert saved_results[0].source_executions == (
+        SourceExecution(
+            source,
+            'partial',
+            saved_results[0].source_executions[0].duration_ms,
+            len(expected_results),
+            'CancelledError',
+            'cancelled',
+        ),
+    )
+    assert {observation.source for observation in saved_results[0].observations} == {source}
+
+
 @pytest.mark.asyncio
 async def test_source_failure_retains_normalized_partial_results(monkeypatch: pytest.MonkeyPatch) -> None:
     completed: list[CompletedResult] = []
@@ -1315,7 +1470,7 @@ async def test_source_failure_retains_normalized_partial_results(monkeypatch: py
             raise RuntimeError('provider page failed')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.builtwith, 'SearchBuiltWith', PartiallyFailingBuiltWith)
+    monkeypatch.setattr(source_runner.builtwith, 'SearchBuiltWith', PartiallyFailingBuiltWith)
     monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'builtwith'])
 
     with pytest.raises(SystemExit) as exit_info:
@@ -1390,7 +1545,7 @@ async def test_source_checkpoint_excludes_other_source_work_in_progress(monkeypa
             release_builtwith.set()
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.builtwith, 'SearchBuiltWith', PausedBuiltWith)
+    monkeypatch.setattr(source_runner.builtwith, 'SearchBuiltWith', PausedBuiltWith)
     monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FastCrtsh)
     monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'builtwith,crtsh'])
 

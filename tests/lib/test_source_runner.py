@@ -45,8 +45,11 @@ def test_source_factories_match_the_catalog() -> None:
     [
         ('crtsh', 'theHarvester.lib.source_runner.crtsh.SearchCrtsh', ('example.test',)),
         ('apis-guru', 'theHarvester.lib.source_runner.apisguru.SearchApisGuru', ('example.test', 25)),
+        ('builtwith', 'theHarvester.lib.source_runner.builtwith.SearchBuiltWith', ('example.test',)),
+        ('hudsonrock', 'theHarvester.lib.source_runner.hudsonrocksearch.SearchHudsonRock', ('example.test',)),
         ('hunter', 'theHarvester.lib.source_runner.huntersearch.SearchHunter', ('example.test', 25, 5)),
         ('dehashed', 'theHarvester.lib.source_runner.search_dehashed.SearchDehashed', ('example.test', 25)),
+        ('shodan', 'theHarvester.lib.source_runner.shodansearch.SearchShodan', ('example.test',)),
     ],
 )
 def test_factory_constructor_shapes(
@@ -196,6 +199,72 @@ async def test_runner_reports_normal_zero_yield_as_completed_no_results(monkeypa
     assert outcome.execution.status == 'completed'
     assert outcome.execution.stop_reason == 'no-results'
     assert outcome.execution.result_count == 0
+
+
+@pytest.mark.parametrize('source', ['builtwith', 'hudsonrock', 'shodan'])
+@pytest.mark.parametrize(
+    ('reported_status', 'reported_reason', 'has_results', 'expected_count'),
+    [
+        ('completed', None, False, 0),
+        ('partial', 'provider-partial', True, 1),
+        ('failed', 'provider-failure', False, 0),
+        ('rate-limited', 'http-429', False, 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_special_sources_share_runner_outcome_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    reported_status: str,
+    reported_reason: str | None,
+    has_results: bool,
+    expected_count: int,
+) -> None:
+    class FakeSpecialSource:
+        execution_status = reported_status
+        stop_reason = reported_reason
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'partial.example.test'} if has_results else set()
+
+        async def get_emails(self) -> set[str]:
+            return set()
+
+        async def get_urls(self) -> set[str]:
+            return set()
+
+        async def get_frameworks(self) -> set[str]:
+            return set()
+
+        async def get_languages(self) -> set[str]:
+            return set()
+
+        async def get_servers(self) -> set[str]:
+            return set()
+
+        async def get_cms(self) -> set[str]:
+            return set()
+
+        async def get_analytics(self) -> set[str]:
+            return set()
+
+        async def get_credential_exposures(self) -> list[dict[str, object]]:
+            return []
+
+        async def get_infostealers(self) -> list[dict[str, object]]:
+            return []
+
+    monkeypatch.setitem(SOURCE_FACTORIES, source, lambda _request: FakeSpecialSource())
+
+    outcome = await run_source(SourceRequest(source, 'example.test', 25, 0, False, True))
+
+    assert outcome.execution.status == reported_status
+    assert outcome.execution.stop_reason == (reported_reason or 'no-results')
+    assert outcome.execution.result_count == expected_count
+    assert {observation.source for observation in outcome.observations} == ({source} if has_results else set())
 
 
 @pytest.mark.asyncio

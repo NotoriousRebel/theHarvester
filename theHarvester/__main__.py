@@ -29,7 +29,6 @@ from theHarvester.discovery import (
     bevigil,
     bravesearch,
     bufferoverun,
-    builtwith,
     censysearch,
     certspottersearch,
     commoncrawl,
@@ -46,7 +45,6 @@ from theHarvester.discovery import (
     hackertarget,
     haveibeenpwned,
     hibpverified,
-    hudsonrocksearch,
     huntersearch,
     intelxsearch,
     leakix,
@@ -887,34 +885,6 @@ async def start(
             breach_names = await search_engine.get_breach_names()
             all_breaches.extend(breach_names)
             record_source_observations(source, 'breach', breach_names)
-        if source == 'builtwith':
-            technology_results: tuple[tuple[str, list[Any], ResultKind], ...] = (
-                ('get_frameworks', all_frameworks, 'framework'),
-                ('get_languages', all_languages, 'language'),
-                ('get_servers', all_servers, 'server'),
-                ('get_cms', all_cms, 'cms'),
-                ('get_analytics', all_analytics, 'analytics'),
-            )
-            for getter_name, results, result_type in technology_results:
-                values = await getattr(search_engine, getter_name)()
-                results.extend(values)
-                record_source_observations(source, result_type, values)
-        if source == 'hudsonrock':
-            get_credential_exposures = getattr(search_engine, 'get_credential_exposures', None)
-            exposures = await get_credential_exposures() if get_credential_exposures is not None else []
-            all_credential_exposures.extend(exposures)
-            record_source_observations(
-                source,
-                'credential-exposure',
-                (json.dumps(exposure, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for exposure in exposures),
-            )
-            infostealers = await search_engine.get_infostealers()
-            all_infostealers.extend(infostealers)
-            record_source_observations(
-                source,
-                'infostealer',
-                (json.dumps(stealer, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for stealer in infostealers),
-            )
 
     async def run_legacy_source(search_engine: Any, source: str) -> None:
         source_spec = get_source_spec(source)
@@ -1183,16 +1153,7 @@ async def start(
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'builtwith':
-                    try:
-                        builtwith_search = builtwith.SearchBuiltWith(word)
-                        stor_lst.append(store(builtwith_search, engineitem))
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            output_logger.info(f"Failed to perform BuiltWith search for word: '{word}'")
-                            output_logger.info(f'A Missing Key Error occurred in builtwith: {e}')
-                        else:
-                            show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'censys':
                     try:
@@ -1424,20 +1385,7 @@ async def start(
                         show_default_error_message(engineitem, word, error)
 
                 elif engineitem == 'hudsonrock':
-                    try:
-                        hudsonrock_search = hudsonrocksearch.SearchHudsonRock(word)
-                        stor_lst.append(
-                            store(
-                                hudsonrock_search,
-                                engineitem,
-                            )
-                        )
-                    except MissingKey as error:
-                        record_missing_credentials(engineitem)
-                        if not args.quiet:
-                            output_logger.info(f'A Missing Key error occurred in Hudson Rock search: {error}')
-                    except Exception as e:
-                        output_logger.info(f'An exception has occurred in Hudson Rock search: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'hunter':
                     try:
@@ -1715,15 +1663,7 @@ async def start(
                             show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'shodan':
-                    try:
-                        stor_lst.append(store(shodansearch.SearchShodan(word), engineitem))
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in Shodan search: {e}')
-                        else:
-                            output_logger.info(f'An exception has occurred in Shodan search: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'shodanInternetDB':
                     try:
