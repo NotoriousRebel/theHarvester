@@ -1176,8 +1176,7 @@ async def test_schema_v4_merges_deprecated_url_kinds_without_losing_origins(tmp_
                 (str(run_id), 0, 'api-endpoint', target_url),
                 (str(run_id), 1, 'hostname', 'portal.example.com'),
                 (str(run_id), 2, 'interesting-url', target_url),
-                (str(run_id), 3, 'linkedin-link', target_url),
-                (str(run_id), 4, 'url', target_url),
+                (str(run_id), 3, 'url', target_url),
             ],
         )
         db.executemany(
@@ -1196,11 +1195,10 @@ async def test_schema_v4_merges_deprecated_url_kinds_without_losing_origins(tmp_
             'INSERT INTO result_origins (run_id, result_position, execution_position) VALUES (?, ?, ?)',
             [
                 (str(run_id), 2, 0),
-                (str(run_id), 3, 1),
-                (str(run_id), 4, 2),
+                (str(run_id), 3, 2),
                 (str(run_id), 0, 3),
                 (str(run_id), 2, 3),
-                (str(run_id), 4, 3),
+                (str(run_id), 3, 3),
             ],
         )
         db.execute(
@@ -1224,7 +1222,6 @@ async def test_schema_v4_merges_deprecated_url_kinds_without_losing_origins(tmp_
             'INSERT INTO legacy_observations (domain, resource, kind, discovered_on, source) VALUES (?, ?, ?, ?, ?)',
             [
                 ('example.com', target_url, 'interesting-url', '2026-08-09', 'builtwith'),
-                ('example.com', target_url, 'linkedinlinks', '2026-08-09', 'rocketreach'),
             ],
         )
 
@@ -1236,7 +1233,6 @@ async def test_schema_v4_merges_deprecated_url_kinds_without_losing_origins(tmp_
     assert {(item.source, item.kind, item.value) for item in loaded.observations} == {
         ('builtwith', 'url', target_url),
         ('gitlab', 'url', target_url),
-        ('rocketreach', 'url', target_url),
     }
     api_scan = next(item for item in loaded.active_evidence.executions if item.action == 'api-scan')
     assert api_scan.result_count == 1
@@ -1341,7 +1337,6 @@ async def test_released_results_migrate_to_legacy_observations(tmp_path) -> None
         ('example.com', 'api.example.com', 'host', '2026-08-08', 'crtsh'),
         ('example.com', '192.0.2.1', 'ip', '2026-08-08', 'dns'),
         ('example.com', 'Ada Lovelace', 'people', '2026-08-08', 'hunter'),
-        ('example.com', 'https://linkedin.test/ada', 'linkedinlinks', '2026-08-08', 'linkedin'),
         ('example.com', 'https://admin.example.com', 'interestingurls', '2026-08-08', 'builtwith'),
         ('example.com', 'AS64496', 'asns', '2026-08-08', 'shodan'),
         ('example.com', '/api/v1', 'api_endpoint', '2026-08-08', 'api_scan'),
@@ -1365,7 +1360,6 @@ async def test_released_results_migrate_to_legacy_observations(tmp_path) -> None
         ('api.example.com', 'hostname'),
         ('192.0.2.1', 'ip'),
         ('Ada Lovelace', 'person'),
-        ('https://linkedin.test/ada', 'url'),
         ('https://admin.example.com', 'url'),
         ('AS64496', 'asn'),
         ('/api/v1', 'url'),

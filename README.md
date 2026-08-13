@@ -150,7 +150,7 @@ When `--proxies` and `--take-over` are combined, supported discovery and takeove
 
 ## Discovery sources
 
-The table shows which result types each source can add to consolidated CLI results. XML keeps its existing schema. Legacy JSON now consolidates `interesting_urls`, `linkedin_links`, and `trello_urls` into one `urls` field. Breach names are retained in JSONL and SQLite. Some adapters parse fields that the reports do not store.
+The table shows which result types each source can add to consolidated CLI results. XML keeps its existing schema. Legacy JSON consolidates `interesting_urls` and `trello_urls` into one `urls` field. Breach names are retained in JSONL and SQLite. Some adapters parse fields that the reports do not store.
 
 JSON and XML group findings by result type without source attribution. JSONL and SQLite retain source attribution when the collection adapter provides it. Empty optional fields may be omitted.
 BuiltWith's normalized frameworks, languages, servers, CMS products, and analytics products are retained in JSONL and completed-result SQLite rows.
@@ -238,8 +238,6 @@ Provider pricing is intentionally omitted because plans and quotas change freque
 
 `haveibeenpwned` remains the keyless public breach catalogue. `hibpverified` is a separate authenticated source for HIBP's `breachedDomain` endpoint. It participates in `all` and matching capability selectors just like every other P0 source, and skips normally when its provider key is absent. API run requests can select it through the shared source contract and return normalized emails plus stable breach names. A live run requires a user-owned paid HIBP API key and a user-owned domain verified in that account; routine tests use offline responses.
 
-The runtime registry also reports the legacy identifiers `linkedin`, `netcraft`, `omnisint`, `sublist3r`, and `zoomeyeapi`. These identifiers have no active CLI handlers. The table does not present them as usable sources.
-
 ## Configuration
 
 On first use, theHarvester creates default configuration files under `~/.theHarvester/`. It also reads system configuration from `/etc/theHarvester/` and `/usr/local/etc/theHarvester/`.
@@ -275,7 +273,7 @@ The JSON report is a single object. Host entries remain plain hostnames or `host
 | `shodan` | Always | Shodan enrichment rows; an empty array when Shodan is not used. |
 | `ips`, `emails`, `vhosts`, `asns`, `prefixes` | When non-empty | Network and contact findings. RouteViews prefixes are external routing relationships, not claimed target scope. |
 | `urls` | When non-empty | Discovered URLs from every URL-producing source or action. |
-| `people`, `twitter_people`, `linkedin_people` | When non-empty | People and profile findings. |
+| `people`, `twitter_people` | When non-empty | People and profile findings. |
 | `takeover_results` | When non-empty | Optional takeover-check results. |
 
 The XML report contains the command, emails, hosts, and virtual hosts. Use JSON when you need the additional result types above.

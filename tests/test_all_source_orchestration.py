@@ -112,8 +112,11 @@ async def test_activity_summary_covers_api_scan_without_sources(
 
 
 @pytest.mark.asyncio
-async def test_legacy_handlerless_source_does_not_break_activity_summary(
+@pytest.mark.parametrize('source', ['linkedin', 'netcraft', 'omnisint', 'sublist3r', 'zoomeyeapi'])
+async def test_removed_source_is_rejected_before_source_execution(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
 ) -> None:
     class FakeResultStore:
         async def initialize(self) -> None:
@@ -123,12 +126,13 @@ async def test_legacy_handlerless_source_does_not_break_activity_summary(
             return None
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-b', 'linkedin'])
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-b', source])
 
     with pytest.raises(SystemExit) as exit_info:
         await theharvester_main.start()
 
-    assert exit_info.value.code == 0
+    assert exit_info.value.code == 1
+    assert 'SourceDidNotStart' not in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -235,9 +239,6 @@ async def test_all_schedules_each_passive_catalog_source_once_and_reports_result
 
         async def get_urls(self) -> set[str]:
             return {'https://sub.example.test/evidence'}
-
-        async def get_host_ip_pairs(self) -> set[tuple[str, str]]:
-            return set()
 
         async def get_breach_names(self) -> set[str]:
             return {'ExampleBreach'}
