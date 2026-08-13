@@ -107,6 +107,8 @@ def parse_result_jsonl(payload: bytes | str) -> tuple[dict[str, object], list[di
             if result_kind == 'prefix' and normalized_result_value != result_value:
                 raise ValueError('prefix result is not canonical')
         except ValueError as error:
+            if result_kind == 'credential-exposure':
+                raise ValueError(f'JSONL {result_kind} has invalid value: {error}') from error
             label = 'ASN' if result_kind == 'asn' else 'prefix'
             raise ValueError(f'JSONL findings must use a canonical {label} value') from error
         record['value'] = normalized_result_value

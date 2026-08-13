@@ -1108,6 +1108,26 @@ def test_completed_result_rejects_invalid_findings(value: Any) -> None:
         )
 
 
+def test_completed_result_preserves_released_infostealer_shape() -> None:
+    value = json.dumps(
+        {
+            'email': 'analyst@example.com',
+            'malware_path': '/historical/path',
+            'computer_name': None,
+            'top_corporate_services': [{'domain': 'portal.example.com'}],
+        },
+        sort_keys=True,
+    )
+    result = CompletedResult.finish(
+        target='example.com',
+        started_at=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 5, 12, 1, tzinfo=UTC),
+        groups={'infostealer': [value]},
+    )
+
+    assert ('infostealer', value) in result.results
+
+
 def test_completed_result_rejects_invalid_completion() -> None:
     started_at = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
 

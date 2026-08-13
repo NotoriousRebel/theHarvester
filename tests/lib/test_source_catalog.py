@@ -97,7 +97,7 @@ def test_source_specs_describe_consolidated_routes_not_getter_presence() -> None
 
 
 def test_every_url_source_uses_one_route() -> None:
-    url_sources = {'apis-guru', 'bevigil', 'builtwith', 'gitlab', 'intelx', 'rocketreach', 'urlscan', 'zoomeye'}
+    url_sources = {'apis-guru', 'bevigil', 'builtwith', 'gitlab', 'hudsonrock', 'intelx', 'rocketreach', 'urlscan', 'zoomeye'}
 
     assert {spec.name for spec in SOURCE_SPECS.values() if ResultRoute.URLS in spec.routes} == url_sources
     assert {route.name for route in ResultRoute} == {

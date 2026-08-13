@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Migrated Censys discovery from the deprecated Python Search SDK to the Censys Platform API, using a Personal Access Token and optional organization ID.
+- Migrated Hudson Rock to its authenticated v3 discovery and domain-search endpoints with bounded pagination and sanitized typed credential-exposure evidence.
 - Removed the transport-wide delay before reading ready HTTP responses, bounded Wayback Archive to 30 seconds and Common Crawl to 120 seconds, kept both sources within the requested result limit, and made long-source progress visible in verbose mode. Common Crawl now requests one 50-record page at a time instead of bursting page batches.
 - Made Baidu, crt.sh, HackerTarget, Have I Been Pwned, Mojeek, OTX, and Robtex report blocked, malformed, or transport failures truthfully. Also fixed HackerTarget CSV parsing and Robtex AAAA results.
 - Hardened BufferOver, ProjectDiscovery, DNSDumpster, ONYPHE, and URLScan parsing and result attribution, including scoped typed results and bounded URLScan pagination.

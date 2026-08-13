@@ -170,6 +170,7 @@ class Core:
         'github': ('key',),
         'hackertarget': ('key',),
         'hibpverified': ('key',),
+        'hudsonrock': ('key',),
         'hunter': ('key',),
         'hunterhow': ('key',),
         'intelx': ('key',),
@@ -288,6 +289,11 @@ class Core:
     @staticmethod
     def hibpverified_key() -> str | None:
         return Core.api_keys().get('hibpverified', {}).get('key')
+
+    @staticmethod
+    def hudsonrock_key() -> str | None:
+        value = Core.api_keys().get('hudsonrock', {}).get('key')
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
     @staticmethod
     def hunter_key() -> str:
@@ -703,10 +709,12 @@ class AsyncFetcher:
 
     @classmethod
     @contextlib.asynccontextmanager
-    async def _open_get_response(
+    async def _open_response(
         cls,
         url: str,
         *,
+        method: str = 'GET',
+        json_body: dict[str, Any] | None = None,
         params: Sized = '',
         proxy: str | bool | None = '',
         headers: dict[str, str] | None = None,
@@ -734,9 +742,11 @@ class AsyncFetcher:
                 request_kwargs['proxy'] = proxy_url
             if params != '':
                 request_kwargs['params'] = params
+            if json_body is not None:
+                request_kwargs['json'] = json_body
             async with contextlib.AsyncExitStack() as stack:
                 try:
-                    response = await stack.enter_async_context(session.request('GET', url, **request_kwargs))
+                    response = await stack.enter_async_context(session.request(method, url, **request_kwargs))
                 except (aiohttp.ClientError, TimeoutError, OSError, ssl.SSLError, ValueError) as error:
                     raise ResponseStreamError('transport-error') from error
                 yield response
@@ -748,14 +758,18 @@ class AsyncFetcher:
         cls,
         url: str,
         *,
+        method: str = 'GET',
+        json_body: dict[str, Any] | None = None,
         params: Sized = '',
         proxy: str | bool | None = '',
         headers: dict[str, str] | None = None,
         request_timeout: int = 60,
     ) -> FetcherResponse:
         """Fetch one bounded JSON response without following redirects."""
-        async with cls._open_get_response(
+        async with cls._open_response(
             url,
+            method=method,
+            json_body=json_body,
             params=params,
             proxy=proxy,
             headers=headers,
@@ -803,7 +817,7 @@ class AsyncFetcher:
         """
         if framing not in {'ndjson', 'sse'}:
             raise ValueError(f'unsupported stream framing: {framing}')
-        async with cls._open_get_response(
+        async with cls._open_response(
             url,
             params=params,
             proxy=proxy,

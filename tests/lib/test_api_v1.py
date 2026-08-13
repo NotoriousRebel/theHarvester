@@ -382,6 +382,7 @@ def test_source_catalog_exposes_shared_action_activities(tmp_path, monkeypatch) 
     assert catalog['sources']
     censys = next(source for source in catalog['sources'] if source['name'] == 'censys')
     assert censys['credentials'] == ['api-token']
+    assert next(source for source in catalog['sources'] if source['name'] == 'hudsonrock')['credentials'] == ['api-key']
     assert catalog['actions'] == [
         {'name': 'api-scan', 'activity': 'P2'},
         {'name': 'dns-brute', 'activity': 'P1'},
@@ -923,6 +924,61 @@ def test_api_jsonl_round_trip_uses_canonical_hostname_and_ip_kinds(tmp_path, mon
         assert imported.json()['results'] == [{'type': finding_type, 'value': value, 'sources': [], 'actions': []}]
         assert json.loads(exported.text.splitlines()[1]) == {'sources': [], 'type': finding_type, 'value': value}
         assert reimported.json()['results'] == [{'type': finding_type, 'value': value, 'sources': [], 'actions': []}]
+
+
+def test_api_jsonl_round_trip_preserves_credential_exposure(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import api
+
+    monkeypatch.setenv('THEHARVESTER_API_KEY', 'test-key')
+    monkeypatch.setenv('THEHARVESTER_RUN_DB', str(tmp_path / 'runs.sqlite'))
+    monkeypatch.setenv('THEHARVESTER_RUN_WORKER', 'disabled')
+    headers = {'X-API-Key': 'test-key'}
+    value = '{"credential_type":"employee","provider":"hudsonrock-v3","url":"https://portal.example.test"}'
+
+    with TestClient(api.app, client=('127.0.0.19', 50000)) as client:
+        imported = client.post(
+            '/api/v1/runs/import',
+            params={'filename': 'credential-exposure.jsonl'},
+            headers=headers,
+            content=_jsonl_result(
+                finding_type='credential-exposure',
+                value=value,
+                summary_fields={'run_id': '7b9de0f0-3288-4ebd-bb91-50df2d86a720'},
+            ),
+        )
+        exported = client.get(f'/api/v1/runs/{imported.json()["run_id"]}/export', headers=headers)
+
+    expected = [{'type': 'credential-exposure', 'value': value, 'sources': [], 'actions': []}]
+    assert imported.status_code == 201
+    assert imported.json()['results'] == expected
+    assert json.loads(exported.text.splitlines()[1]) == {
+        'sources': [],
+        'type': 'credential-exposure',
+        'value': value,
+    }
+
+
+def test_api_jsonl_import_rejects_sensitive_credential_exposure(tmp_path, monkeypatch) -> None:
+    from theHarvester.lib.api import api
+
+    monkeypatch.setenv('THEHARVESTER_API_KEY', 'test-key')
+    monkeypatch.setenv('THEHARVESTER_RUN_DB', str(tmp_path / 'runs.sqlite'))
+    monkeypatch.setenv('THEHARVESTER_RUN_WORKER', 'disabled')
+
+    with TestClient(api.app, client=('127.0.0.20', 50000)) as client:
+        response = client.post(
+            '/api/v1/runs/import',
+            params={'filename': 'sensitive.jsonl'},
+            headers={'X-API-Key': 'test-key'},
+            content=_jsonl_result(
+                finding_type='credential-exposure',
+                value='{"password":"never-persist","raw":{"cookie":"never-persist"}}',
+                summary_fields={'run_id': '07148969-fc48-4095-8e95-2e9fc8299ee9'},
+            ),
+        )
+
+    assert response.status_code == 400
+    assert 'unsupported fields' in response.json()['detail']
 
 
 def test_api_jsonl_round_trip_preserves_grouped_virtual_host_observations(tmp_path, monkeypatch) -> None:
