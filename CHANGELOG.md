@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the nonfunctional ThreatCrowd source because its service hostnames terminate at deleted AWS load balancers and return NXDOMAIN; OTX remains available through its separate adapter.
 
 ### Fixed
+- Bounded bulk HTTP fetches to a fixed worker count with deterministic result ordering, proxy-safe routing, and awaited cleanup on failure or cancellation.
 - Guaranteed durable run child/helper cleanup across failures and cancellation, capped captured output with explicit truncation markers, and prevented queued-run wakeups from being lost.
 - Sent a stable, versioned theHarvester identity with provider and API requests while preserving explicit browser identities for sources that require them.
 - Kept API endpoint scan URLs canonical instead of prefixing targets onto already complete URLs.
