@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added root contributor and security policies, structured issue forms, repository agent guidance, discovery terminology, and an operator-focused documentation wiki ([d090a29a](https://github.com/laramies/theHarvester/commit/d090a29a), [7c491ef5](https://github.com/laramies/theHarvester/commit/7c491ef5), [8b9d420b](https://github.com/laramies/theHarvester/commit/8b9d420b)).
 
 ### Changed
+- Deduplicated hostname DNS validation into one scan-wide, resource-bounded phase and reverse DNS into a separate bounded global job set, preserving partial evidence and source provenance.
 - Routed BuiltWith, Hudson Rock, and the Shodan discovery source through the shared source runner while preserving their typed evidence and output provenance.
 - Routed APIs.guru and Sourcegraph through an immutable, transport-neutral source runner with explicit factories, typed outcomes, bounded structured tasks, and native cancellation propagation.
 - Renamed the CLI's custom API endpoint path option to `--api-wordlist`; `-w` and `--wordlist` remain warning-emitting compatibility aliases for one release and never change DNS brute-force candidates.
