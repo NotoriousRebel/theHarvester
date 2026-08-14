@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -79,7 +80,10 @@ from theHarvester.lib.completed_result import (
 from theHarvester.lib.hostnames import normalize_scoped_hostname
 from theHarvester.lib.source_catalog import ResultRoute, get_source_spec
 
+logger = logging.getLogger(__name__)
+
 SourceFactory = Callable[['SourceRequest'], Any]
+SourceStarted = Callable[['SourceRequest'], None]
 OutcomeCommit = Callable[['SourceOutcome'], None]
 OutcomeAfterCommit = Callable[['SourceOutcome'], Awaitable[None]]
 SOURCE_WORKERS = 3
@@ -267,7 +271,12 @@ def _source_outcome(
     )
 
 
-async def run_source(request: SourceRequest, *, commit_cancelled: OutcomeCommit | None = None) -> SourceOutcome:
+async def run_source(
+    request: SourceRequest,
+    *,
+    commit_cancelled: OutcomeCommit | None = None,
+    on_started: SourceStarted | None = None,
+) -> SourceOutcome:
     started = time.perf_counter()
     observations: set[ResultObservation] = set()
     asn_attributions: set[AsnAttributionObservation] = set()
@@ -276,7 +285,15 @@ async def run_source(request: SourceRequest, *, commit_cancelled: OutcomeCommit 
     process_completed = False
     try:
         source_spec = get_source_spec(request.source)
-        adapter = create_source(request)
+        created_adapter = create_source(request)
+        if on_started is not None:
+            try:
+                on_started(request)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning('Source start reporter failed for %s: %s', request.source, type(error).__name__)
+        adapter = created_adapter
         await adapter.process(request.proxy)
         process_completed = True
         await _collect_observations(request, adapter, observations, asn_attributions, credential_exposures)
@@ -354,6 +371,7 @@ async def run_source_jobs(
     commit: OutcomeCommit | None = None,
     after_commit: OutcomeAfterCommit | None = None,
     semaphore: asyncio.Semaphore | None = None,
+    on_started: SourceStarted | None = None,
 ) -> tuple[SourceOutcome, ...]:
     active_sources = semaphore or asyncio.Semaphore(SOURCE_WORKERS)
     outcomes: list[SourceOutcome | None] = [None] * len(jobs)
@@ -370,7 +388,7 @@ async def run_source_jobs(
 
         try:
             async with active_sources:
-                outcome = await run_source(job.request, commit_cancelled=commit_cancelled)
+                outcome = await run_source(job.request, commit_cancelled=commit_cancelled, on_started=on_started)
                 outcomes[index] = outcome
                 if commit is not None:
                     commit(outcome)

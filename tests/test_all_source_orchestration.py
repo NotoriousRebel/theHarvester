@@ -71,7 +71,7 @@ async def test_activity_summary_includes_source_and_option_classes(
         async def get_asns(self) -> set[str]:
             return set()
 
-    monkeypatch.setattr(theharvester_main.criminalip, 'SearchCriminalIP', FakeCriminalIP)
+    monkeypatch.setattr(source_runner.criminalip, 'SearchCriminalIP', FakeCriminalIP)
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
     monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-b', 'criminalip', '-n', '-s'])
 
@@ -174,11 +174,11 @@ async def test_explicit_non_passive_source_is_scheduled_once(
         monkeypatch.setattr(theharvester_main.shodansearch, 'SearchShodan', lambda *_args: FakeAdapter())
     else:
         module, constructor_name = {
-            'criminalip': (theharvester_main.criminalip, 'SearchCriminalIP'),
-            'pentesttools': (theharvester_main.pentesttools, 'SearchPentestTools'),
-            'shodanInternetDB': (theharvester_main.shodan_internetdb, 'SearchShodanInternetDB'),
-            'subdomainfinderc99': (theharvester_main.subdomainfinderc99, 'SearchSubdomainfinderc99'),
-            'windvane': (theharvester_main.windvane, 'SearchWindvane'),
+            'criminalip': (source_runner.criminalip, 'SearchCriminalIP'),
+            'pentesttools': (source_runner.pentesttools, 'SearchPentestTools'),
+            'shodanInternetDB': (source_runner.shodan_internetdb, 'SearchShodanInternetDB'),
+            'subdomainfinderc99': (source_runner.subdomainfinderc99, 'SearchSubdomainfinderc99'),
+            'windvane': (source_runner.windvane, 'SearchWindvane'),
         }[source]
         monkeypatch.setattr(module, constructor_name, lambda *_args, **_kwargs: FakeAdapter())
 

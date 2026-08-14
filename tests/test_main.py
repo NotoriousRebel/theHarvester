@@ -234,7 +234,7 @@ async def test_virtual_host_action_uses_harvested_hostnames_and_ips(monkeypatch:
         return HarvestedVirtualHostResult((), 5, 1, 1, 1, 1, 'completed')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.rapiddns, 'SearchRapidDns', FakeRapidDNS)
+    monkeypatch.setattr(source_runner.rapiddns, 'SearchRapidDns', FakeRapidDNS)
     monkeypatch.setattr(theharvester_main, 'discover_harvested_virtual_hosts', fake_discover)
 
     response = await theharvester_main.start(
@@ -782,8 +782,8 @@ async def test_rapiddns_hostnames_skip_explicit_dns_resolution(monkeypatch: pyte
             raise AssertionError('RapidDNS must not trigger hostname DNS resolution')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.rapiddns, 'SearchRapidDns', FakeRapidDNS)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FakeCrtsh)
+    monkeypatch.setattr(source_runner.rapiddns, 'SearchRapidDns', FakeRapidDNS)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeCrtsh)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', FakeChecker)
 
     monkeypatch.setattr(
@@ -1092,10 +1092,10 @@ async def test_dns_resolve_cancellation_closes_workers_and_persists_before_propa
             raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.certspottersearch, 'SearchCertspoter', FakeSource)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FakeSource)
-    monkeypatch.setattr(theharvester_main.shodanct, 'SearchShodanCt', FakeSource)
-    monkeypatch.setattr(theharvester_main.subdomaincenter, 'SubdomainCenter', FakeSource)
+    monkeypatch.setattr(source_runner.certspottersearch, 'SearchCertspoter', FakeSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeSource)
+    monkeypatch.setattr(source_runner.shodanct, 'SearchShodanCt', FakeSource)
+    monkeypatch.setattr(source_runner.subdomaincenter, 'SubdomainCenter', FakeSource)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', CancelledChecker)
 
     with pytest.raises(asyncio.CancelledError):
@@ -1140,7 +1140,7 @@ async def test_source_cancellation_before_dns_resolution_does_not_claim_dns_fail
             raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.certspottersearch, 'SearchCertspoter', CancelledSource)
+    monkeypatch.setattr(source_runner.certspottersearch, 'SearchCertspoter', CancelledSource)
 
     with pytest.raises(asyncio.CancelledError):
         await theharvester_main.start(
@@ -1193,7 +1193,7 @@ async def test_dns_resolve_query_errors_are_partial_even_without_findings(monkey
             return [], [], []
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.certspottersearch, 'SearchCertspoter', FakeSource)
+    monkeypatch.setattr(source_runner.certspottersearch, 'SearchCertspoter', FakeSource)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', EmptyChecker)
 
     response = await theharvester_main.start(
@@ -1276,7 +1276,7 @@ async def test_rest_dns_lookup_runs_before_return_and_retains_action_evidence(mo
         callback('PTR.example.com.')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
+    monkeypatch.setattr(source_runner.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
     monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_all_ips_in_range', fake_reverse)
 
     response = await theharvester_main.start(
@@ -1369,7 +1369,7 @@ async def test_dns_lookup_cancels_sibling_ranges_and_persists_partial_evidence(
             raise
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
+    monkeypatch.setattr(source_runner.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
     monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_all_ips_in_range', fake_reverse)
 
     with pytest.raises(asyncio.CancelledError):
@@ -1393,8 +1393,8 @@ async def test_dns_lookup_cancels_sibling_ranges_and_persists_partial_evidence(
 @pytest.mark.parametrize(
     ('source', 'module', 'constructor_name'),
     [
-        ('projectdiscovery', theharvester_main.projectdiscovery, 'SearchDiscovery'),
-        ('bevigil', theharvester_main.bevigil, 'SearchBeVigil'),
+        ('projectdiscovery', source_runner.projectdiscovery, 'SearchDiscovery'),
+        ('bevigil', source_runner.bevigil, 'SearchBeVigil'),
         ('builtwith', source_runner.builtwith, 'SearchBuiltWith'),
         ('hudsonrock', source_runner.hudsonrocksearch, 'SearchHudsonRock'),
         ('shodan', source_runner.shodansearch, 'SearchShodan'),
@@ -1439,6 +1439,197 @@ async def test_constructor_missing_credentials_are_persisted_as_skipped_source(
     assert execution.result_count == 0
     assert execution.error_type == 'MissingKeyError'
     assert execution.stop_reason == 'missing-credentials'
+
+
+@pytest.mark.asyncio
+async def test_target_only_source_reports_search_progress_at_the_cli_seam(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class EmptyBeVigil:
+        def __init__(self, _word: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return set()
+
+        async def get_urls(self) -> set[str]:
+            return set()
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(source_runner.bevigil, 'SearchBeVigil', EmptyBeVigil)
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-b', 'bevigil'])
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert '[*] Searching Bevigil.' in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_source_progress_waits_for_runner_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sources = ('certspotter', 'crt-name', 'crtsh', 'dymo')
+    admitted_sources = sources[: source_runner.SOURCE_WORKERS]
+    constructed: list[str] = []
+    processing: set[str] = set()
+    admitted = asyncio.Event()
+    release = asyncio.Event()
+
+    class GatedSource:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        async def process(self, _proxy: bool) -> None:
+            processing.add(self.source)
+            if len(processing) == source_runner.SOURCE_WORKERS:
+                admitted.set()
+            await release.wait()
+
+        async def get_hostnames(self) -> set[str]:
+            return set()
+
+    def factory(source: str) -> source_runner.SourceFactory:
+        def create(_request: source_runner.SourceRequest) -> GatedSource:
+            constructed.append(source)
+            return GatedSource(source)
+
+        return create
+
+    for source in sources:
+        monkeypatch.setitem(source_runner.SOURCE_FACTORIES, source, factory(source))
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    theharvester_main.configure_logging(verbose=False)
+
+    task = asyncio.create_task(
+        theharvester_main.start(
+            EnumerationOptions(domain='example.test', source=','.join(sources), quiet=False),
+            return_completed_result=True,
+        )
+    )
+    await asyncio.wait_for(admitted.wait(), timeout=1)
+    interim_output = capsys.readouterr().out
+    release.set()
+    await task
+
+    assert constructed[: source_runner.SOURCE_WORKERS] == list(admitted_sources)
+    assert all(f'[*] Searching {source[0].upper() + source[1:]}.' in interim_output for source in admitted_sources)
+    assert '[*] Searching Dymo.' not in interim_output
+
+
+@pytest.mark.parametrize(
+    ('error', 'expected_status', 'expected_error_type', 'expected_stop_reason', 'expected_diagnostic'),
+    [
+        (
+            MissingKey('sensitive-provider-detail'),
+            'skipped',
+            'MissingKeyError',
+            'missing-credentials',
+            '[!] Source bevigil skipped: missing credentials.',
+        ),
+        (
+            RuntimeError('sensitive-provider-detail'),
+            'failed',
+            'RuntimeError',
+            None,
+            '[!] Source bevigil failed: RuntimeError.',
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_target_only_constructor_failure_reports_sanitized_cli_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+    expected_status: str,
+    expected_error_type: str,
+    expected_stop_reason: str | None,
+    expected_diagnostic: str,
+) -> None:
+    saved_results: list[CompletedResult] = []
+
+    class RecordingResultStore(_NoopResultStore):
+        async def save_run(self, result: CompletedResult) -> None:
+            saved_results.append(result)
+
+    class BrokenBeVigil:
+        def __init__(self, _word: str) -> None:
+            raise error
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', RecordingResultStore)
+    monkeypatch.setattr(source_runner.bevigil, 'SearchBeVigil', BrokenBeVigil)
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-b', 'bevigil'])
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    output = capsys.readouterr().out
+    assert exit_info.value.code == 0
+    assert expected_diagnostic in output
+    assert '[*] Searching Bevigil.' not in output
+    assert 'sensitive-provider-detail' not in output
+    execution = saved_results[-1].source_executions[0]
+    assert execution.status == expected_status
+    assert execution.error_type == expected_error_type
+    assert execution.stop_reason == expected_stop_reason
+
+
+@pytest.mark.asyncio
+async def test_source_cancellation_does_not_announce_never_started_queued_source(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sources = ('certspotter', 'crt-name', 'crtsh', 'dymo')
+    cancellation = asyncio.CancelledError('source cancelled')
+    constructed: list[str] = []
+    processing: set[str] = set()
+    admitted = asyncio.Event()
+
+    class CancellingSource:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        async def process(self, _proxy: bool) -> None:
+            processing.add(self.source)
+            if len(processing) == source_runner.SOURCE_WORKERS:
+                admitted.set()
+            await admitted.wait()
+            if self.source == sources[0]:
+                raise cancellation
+            await asyncio.Event().wait()
+
+        async def get_hostnames(self) -> set[str]:
+            return set()
+
+    def factory(source: str) -> source_runner.SourceFactory:
+        def create(_request: source_runner.SourceRequest) -> CancellingSource:
+            constructed.append(source)
+            return CancellingSource(source)
+
+        return create
+
+    for source in sources:
+        monkeypatch.setitem(source_runner.SOURCE_FACTORIES, source, factory(source))
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    theharvester_main.configure_logging(verbose=False)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        async with asyncio.timeout(1):
+            await theharvester_main.start(
+                EnumerationOptions(domain='example.test', source=','.join(sources), quiet=False),
+                return_completed_result=True,
+            )
+
+    output = capsys.readouterr().out
+    assert raised.value is cancellation
+    assert constructed == list(sources[: source_runner.SOURCE_WORKERS])
+    assert '[*] Searching Dymo.' not in output
 
 
 @pytest.mark.parametrize(
@@ -1694,7 +1885,7 @@ async def test_source_checkpoint_excludes_other_source_work_in_progress(monkeypa
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
     monkeypatch.setattr(source_runner.builtwith, 'SearchBuiltWith', PausedBuiltWith)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FastCrtsh)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FastCrtsh)
     monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'builtwith,crtsh'])
 
     with pytest.raises(SystemExit) as exit_info:
@@ -1875,6 +2066,116 @@ async def test_limited_source_orchestration_uses_immutable_runner_request(
     assert execution.stop_reason == 'provider-boundary'
 
 
+@pytest.mark.parametrize(
+    ('source', 'main_module_name', 'constructor_name'),
+    [
+        ('bevigil', 'bevigil', 'SearchBeVigil'),
+        ('bufferoverun', 'bufferoverun', 'SearchBufferover'),
+        ('certspotter', 'certspottersearch', 'SearchCertspoter'),
+        ('criminalip', 'criminalip', 'SearchCriminalIP'),
+        ('crt-name', 'crtname', 'SearchCrtName'),
+        ('crtsh', 'crtsh', 'SearchCrtsh'),
+        ('dnsdb', 'dnsdb', 'SearchDNSDB'),
+        ('dnsdumpster', 'search_dnsdumpster', 'SearchDNSDumpster'),
+        ('dymo', 'dymosearch', 'SearchDymo'),
+        ('fofa', 'fofa', 'SearchFofa'),
+        ('fullhunt', 'fullhuntsearch', 'SearchFullHunt'),
+        ('gitlab', 'gitlabsearch', 'SearchGitlab'),
+        ('hackertarget', 'hackertarget', 'SearchHackerTarget'),
+        ('haveibeenpwned', 'haveibeenpwned', 'SearchHaveIBeenPwned'),
+        ('hibpverified', 'hibpverified', 'SearchHibpVerified'),
+        ('hunterhow', 'searchhunterhow', 'SearchHunterHow'),
+        ('intelx', 'intelxsearch', 'SearchIntelx'),
+        ('leakix', 'leakix', 'SearchLeakix'),
+        ('leaklookup', 'leaklookup', 'SearchLeakLookup'),
+        ('onyphe', 'onyphe', 'SearchOnyphe'),
+        ('otx', 'otxsearch', 'SearchOtx'),
+        ('pentesttools', 'pentesttools', 'SearchPentestTools'),
+        ('projectdiscovery', 'projectdiscovery', 'SearchDiscovery'),
+        ('rapiddns', 'rapiddns', 'SearchRapidDns'),
+        ('robtex', 'robtex', 'SearchRobtex'),
+        ('securityscorecard', 'securityscorecard', 'SearchSecurityScorecard'),
+        ('securityTrails', 'securitytrailssearch', 'SearchSecuritytrail'),
+        ('sherlockeye', 'sherlockeye', 'SearchSherlockeye'),
+        ('shodanInternetDB', 'shodan_internetdb', 'SearchShodanInternetDB'),
+        ('shodanct', 'shodanct', 'SearchShodanCt'),
+        ('subdomaincenter', 'subdomaincenter', 'SubdomainCenter'),
+        ('subdomainfinderc99', 'subdomainfinderc99', 'SearchSubdomainfinderc99'),
+        ('thc', 'thc', 'SearchThc'),
+        ('urlscan', 'urlscan', 'SearchUrlscan'),
+        ('virustotal', 'virustotal', 'SearchVirustotal'),
+        ('whoisxml', 'whoisxml', 'SearchWhoisXML'),
+        ('windvane', 'windvane', 'SearchWindvane'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_target_only_source_orchestration_uses_immutable_runner_request(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    main_module_name: str,
+    constructor_name: str,
+) -> None:
+    requests: list[source_runner.SourceRequest] = []
+    processed_with_proxy: list[bool] = []
+
+    class FakeAdapter:
+        execution_status = 'partial'
+        stop_reason = 'provider-boundary'
+
+        async def process(self, proxy: bool) -> None:
+            processed_with_proxy.append(proxy)
+
+        async def get_hostnames(self) -> set[str]:
+            return {'sub.example.test'}
+
+        async def get_emails(self) -> set[str]:
+            return {'user@example.test'}
+
+        async def get_ips(self) -> set[str]:
+            return {'192.0.2.1'}
+
+        async def get_asns(self) -> set[str]:
+            return {'AS64500'}
+
+        async def get_urls(self) -> set[str]:
+            return {'https://sub.example.test/evidence'}
+
+        async def get_breach_names(self) -> set[str]:
+            return {'Example Breach'}
+
+    def runner_factory(request: source_runner.SourceRequest) -> FakeAdapter:
+        requests.append(request)
+        return FakeAdapter()
+
+    def legacy_constructor(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError('legacy constructor branch was used')
+
+    legacy_module = ModuleType(f'test_legacy_{main_module_name}')
+    setattr(legacy_module, constructor_name, legacy_constructor)
+    monkeypatch.setattr(theharvester_main, main_module_name, legacy_module, raising=False)
+    monkeypatch.setitem(source_runner.SOURCE_FACTORIES, source, runner_factory)
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(
+            domain='example.test',
+            source=source,
+            limit=37,
+            start=11,
+            proxies=True,
+            quiet=True,
+        ),
+        return_completed_result=True,
+    )
+
+    assert requests == [source_runner.SourceRequest(source, 'example.test', 37, 11, True, True)]
+    assert processed_with_proxy == [True]
+    execution = response[-1].source_executions[0]
+    assert execution.source == source
+    assert execution.status == 'partial'
+    assert execution.stop_reason == 'provider-boundary'
+
+
 @pytest.mark.asyncio
 async def test_invalid_source_outcome_is_not_recorded_as_completed(monkeypatch: pytest.MonkeyPatch) -> None:
     completed: list[CompletedResult] = []
@@ -1899,7 +2200,7 @@ async def test_invalid_source_outcome_is_not_recorded_as_completed(monkeypatch: 
             return set()
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', InvalidOutcomeCrtsh)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', InvalidOutcomeCrtsh)
     monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'crtsh'])
 
     with pytest.raises(SystemExit) as exit_info:
@@ -2100,7 +2401,7 @@ async def test_dns_proven_cname_hosts_reach_screenshot_filter(
             return Path(self.output) / f'{host.removeprefix("https://")}.png'
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FakeCrtsh)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeCrtsh)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', FakeChecker)
     monkeypatch.setattr(theharvester_main, 'ScreenShotter', FakeScreenShotter)
     monkeypatch.setattr(
@@ -2558,7 +2859,7 @@ async def test_screenshot_redirects_to_one_login_keep_distinct_subject_artifacts
             return {'first.example.test', 'second.example.test'}
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', TwoHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', TwoHostSource)
     monkeypatch.setattr(theharvester_main, 'ScreenShotter', FakeScreenShotter)
 
     result = await theharvester_main.start(
@@ -2624,7 +2925,7 @@ async def test_screenshot_cancellation_persists_failed_execution_and_propagates(
             return {'first.example.test', 'second.example.test'}
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', RecordingResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', TwoHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', TwoHostSource)
     monkeypatch.setattr(theharvester_main, 'ScreenShotter', FakeScreenShotter)
 
     task = asyncio.create_task(
@@ -2691,7 +2992,7 @@ async def test_screenshot_capture_failure_cancels_sibling_tasks(
             return {'first.example.test', 'second.example.test'}
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', TwoHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', TwoHostSource)
     monkeypatch.setattr(theharvester_main, 'ScreenShotter', FakeScreenShotter)
 
     result = await theharvester_main.start(
@@ -2836,7 +3137,7 @@ async def test_direct_action_evidence_reaches_completed_result(monkeypatch: pyte
     wordlist = tmp_path / 'api.txt'
     wordlist.write_text('/api/v1\n', encoding='utf-8')
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FakeCrtsh)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeCrtsh)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', FakeChecker)
     monkeypatch.setattr(theharvester_main.takeover, 'TakeOver', FakeTakeOver)
     monkeypatch.setattr(theharvester_main, 'ScreenShotter', FakeScreenShotter)
@@ -2937,7 +3238,7 @@ async def test_takeover_action_records_suppressed_outcome(
             return {}
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', _ApiHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', _ApiHostSource)
     monkeypatch.setattr(theharvester_main.takeover, 'TakeOver', FakeTakeOver)
 
     result = await theharvester_main.start(
@@ -2968,7 +3269,7 @@ async def test_shodan_action_records_all_target_errors_as_failed(
         return None
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', _ApiHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', _ApiHostSource)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', _ApiHostChecker)
     monkeypatch.setattr(theharvester_main.shodansearch, 'SearchShodan', FailedShodan)
     monkeypatch.setattr(theharvester_main.asyncio, 'sleep', no_sleep)
@@ -3005,7 +3306,7 @@ async def test_shodan_no_data_is_a_completed_zero_yield_action(monkeypatch: pyte
         return None
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', _ApiHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', _ApiHostSource)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', _ApiHostChecker)
     monkeypatch.setattr(theharvester_main.shodansearch, 'SearchShodan', EmptyShodan)
     monkeypatch.setattr(theharvester_main.asyncio, 'sleep', no_sleep)
@@ -3367,7 +3668,7 @@ async def test_routeviews_pivots_from_attributed_ips_without_expanding_discovere
         return RouteViewsResult((), (), (), 2, 0, 'completed', stop_reason='no-results')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
-    monkeypatch.setattr(theharvester_main.urlscan, 'SearchUrlscan', FakeUrlscan)
+    monkeypatch.setattr(source_runner.urlscan, 'SearchUrlscan', FakeUrlscan)
     monkeypatch.setattr(theharvester_main, 'enrich_routeviews', fake_routeviews)
     monkeypatch.setattr(theharvester_main.Core, 'routeviews_key', staticmethod(lambda: None))
 
@@ -3638,7 +3939,7 @@ async def test_takeover_failure_persists_and_propagates(
             return {}
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', _ApiHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', _ApiHostSource)
     monkeypatch.setattr(theharvester_main.takeover, 'TakeOver', CancelledTakeOver)
 
     with pytest.raises(type(raised_error)):
@@ -3679,7 +3980,7 @@ async def test_shodan_cancellation_persists_failure_and_propagates(monkeypatch: 
         raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', _ApiHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', _ApiHostSource)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', FakeChecker)
     monkeypatch.setattr(theharvester_main.shodansearch, 'SearchShodan', CancelledShodan)
     monkeypatch.setattr(theharvester_main.asyncio, 'sleep', cancel_during_throttle)
@@ -3739,7 +4040,7 @@ async def test_direct_action_checkpoint_cancellation_persists_and_propagates(
             raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', _ApiHostSource)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', _ApiHostSource)
     monkeypatch.setattr(theharvester_main.takeover, 'TakeOver', FakeTakeOver)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', _ApiHostChecker)
     monkeypatch.setattr(theharvester_main.shodansearch, 'SearchShodan', FakeShodan)
@@ -3836,7 +4137,7 @@ async def test_recursive_dns_results_reach_completed_output_without_changing_leg
         )
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FakeCrtsh)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeCrtsh)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', FakeChecker)
     monkeypatch.setattr(theharvester_main, 'AioDNSResolverVantage', FakeResolver)
     monkeypatch.setattr(theharvester_main, 'discover_recursive_dns', fake_recursive)
@@ -4010,7 +4311,7 @@ async def test_recursive_dns_closes_resolvers_on_failure_and_preserves_cancellat
         raise error_type()
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
-    monkeypatch.setattr(theharvester_main.crtsh, 'SearchCrtsh', FakeCrtsh)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeCrtsh)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', FakeChecker)
     monkeypatch.setattr(theharvester_main, 'AioDNSResolverVantage', FakeResolver)
     monkeypatch.setattr(theharvester_main, 'discover_recursive_dns', fail_recursive)
