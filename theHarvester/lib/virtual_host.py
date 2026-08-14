@@ -15,10 +15,12 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from theHarvester.lib.cancellation import drain_tasks_after_cancellation
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 ProbePhase = Literal['connect', 'tls', 'headers', 'body']
 VirtualHostClassification = Literal['distinct', 'default', 'indeterminate']
@@ -499,14 +501,6 @@ class HarvestedVirtualHostResult:
     scan_error_type: str | None = None
 
 
-class VirtualHostDiscoveryCancelled(asyncio.CancelledError):
-    """Carry completed virtual-host evidence while preserving cancellation."""
-
-    def __init__(self, result: HarvestedVirtualHostResult) -> None:
-        super().__init__('virtual-host discovery cancelled')
-        self.result = result
-
-
 @dataclass(frozen=True, slots=True)
 class _Fingerprint:
     phase: ProbePhase
@@ -659,6 +653,8 @@ async def _probe_batch(
     completed: dict[int, ProbeObservation],
 ) -> None:
     tasks = [asyncio.create_task(_probe(session, request, hostname)) for hostname in hostnames]
+    if not tasks:
+        return
 
     def retain_completed() -> None:
         for index, task in enumerate(tasks):
@@ -666,13 +662,19 @@ async def _probe_batch(
                 completed[index] = task.result()
 
     try:
-        completed.update(enumerate(await asyncio.gather(*tasks)))
-    except (asyncio.CancelledError, Exception):
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        if pending:
+            next(task for task in tasks if task.done() and not task.cancelled() and task.exception() is not None).result()
+        completed.update((index, task.result()) for index, task in enumerate(tasks))
+    except asyncio.CancelledError as cancellation:
+        await drain_tasks_after_cancellation(tasks, cancel=True)
         retain_completed()
+        raise cancellation
+    except Exception:
+        cancellations = await drain_tasks_after_cancellation(tasks, cancel=True)
+        retain_completed()
+        if cancellations:
+            raise cancellations[0]
         raise
 
 
@@ -728,7 +730,7 @@ def _classify_candidate(
     return observation
 
 
-async def discover_virtual_hosts(
+async def _discover_virtual_hosts(
     request: VirtualHostRequest,
     *,
     _preserve_partial_on_cancel: bool = False,
@@ -889,6 +891,25 @@ async def discover_virtual_hosts(
     )
 
 
+async def discover_virtual_hosts(
+    request: VirtualHostRequest,
+    *,
+    _preserve_partial_on_cancel: bool = False,
+) -> VirtualHostDiscoveryResult:
+    scan = asyncio.create_task(
+        _discover_virtual_hosts(request, _preserve_partial_on_cancel=_preserve_partial_on_cancel),
+        name='virtual-host-discovery',
+    )
+    try:
+        await asyncio.wait((scan,))
+    except asyncio.CancelledError as cancellation:
+        await drain_tasks_after_cancellation((scan,), cancel=True)
+        if _preserve_partial_on_cancel and not scan.cancelled() and scan.exception() is None:
+            return scan.result()
+        raise cancellation
+    return scan.result()
+
+
 def _harvested_endpoints(addresses: tuple[str, ...]) -> tuple[str, ...]:
     parsed_addresses = set()
     for value in addresses:
@@ -935,6 +956,7 @@ async def discover_harvested_virtual_hosts(
     limits: VirtualHostLimits,
     insecure: bool = False,
     endpoint_override: str = '',
+    commit_cancelled: Callable[[HarvestedVirtualHostResult], None] | None = None,
 ) -> HarvestedVirtualHostResult:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + limits.runtime_seconds
@@ -981,6 +1003,10 @@ async def discover_harvested_virtual_hosts(
             request_error_types=tuple(sorted(request_error_types)),
             scan_error_type=scan_error_type,
         )
+
+    def commit_cancelled_result() -> None:
+        if commit_cancelled is not None:
+            commit_cancelled(harvested_result('cancelled'))
 
     maximum_endpoint_count = limits.request_limit // (VHOST_BASELINE_REQUEST_COUNT + 1)
     endpoints_were_limited = len(endpoints) > maximum_endpoint_count
@@ -1032,38 +1058,39 @@ async def discover_harvested_virtual_hosts(
         )
         try:
             done, _pending = await asyncio.wait((task,), timeout=max(0, deadline - loop.time()))
-        except asyncio.CancelledError as error:
-            task.cancel()
-            outcome = (await asyncio.gather(task, return_exceptions=True))[0]
-            if isinstance(outcome, VirtualHostDiscoveryResult):
-                merge_result(outcome)
+        except asyncio.CancelledError as cancellation:
+            await drain_tasks_after_cancellation((task,), cancel=True)
+            if not task.cancelled() and task.exception() is None:
+                merge_result(task.result())
             scan_error_type = 'CancelledError'
-            raise VirtualHostDiscoveryCancelled(harvested_result('cancelled')) from error
+            commit_cancelled_result()
+            raise cancellation
         if task in done:
             try:
                 result = task.result()
-            except asyncio.CancelledError as error:
+            except asyncio.CancelledError:
                 scan_error_type = 'CancelledError'
-                raise VirtualHostDiscoveryCancelled(harvested_result('cancelled')) from error
+                commit_cancelled_result()
+                raise
             except Exception as error:
                 scan_error_type = type(error).__name__
                 break
         else:
             runtime_limited = True
-            task.cancel()
-            try:
-                result = await task
-            except asyncio.CancelledError as error:
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    scan_error_type = 'CancelledError'
-                    raise VirtualHostDiscoveryCancelled(harvested_result('cancelled')) from error
-                break
-            current_task = asyncio.current_task()
-            if current_task is not None and current_task.cancelling():
+            cancellations = await drain_tasks_after_cancellation((task,), cancel=True)
+            if cancellations:
+                if not task.cancelled() and task.exception() is None:
+                    merge_result(task.result())
                 scan_error_type = 'CancelledError'
-                merge_result(result)
-                raise VirtualHostDiscoveryCancelled(harvested_result('cancelled'))
+                commit_cancelled_result()
+                raise cancellations[0]
+            if task.cancelled():
+                break
+            try:
+                result = task.result()
+            except Exception as error:
+                scan_error_type = type(error).__name__
+                break
         merge_result(result)
         logger.info(
             'Virtual-host endpoint %d/%d finished: stop=%s; requests=%d; candidates=%d/%d; errors=%d',

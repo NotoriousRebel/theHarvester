@@ -84,6 +84,7 @@ from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker
 from theHarvester.lib.active_evidence import ActionExecution, ActiveEvidence, ArtifactReference
 from theHarvester.lib.asn_attribution import AsnAttributionObservation
+from theHarvester.lib.cancellation import drain_tasks_after_cancellation
 from theHarvester.lib.completed_result import (
     EXECUTION_STATUSES,
     CompletedResult,
@@ -125,7 +126,7 @@ from theHarvester.lib.virtual_host import (
     DEFAULT_VHOST_REQUEST_LIMIT,
     DEFAULT_VHOST_RUNTIME_SECONDS,
     DEFAULT_VHOST_TIMEOUT_SECONDS,
-    VirtualHostDiscoveryCancelled,
+    HarvestedVirtualHostResult,
     VirtualHostLimits,
     VirtualHostObservation,
     discover_harvested_virtual_hosts,
@@ -2534,6 +2535,12 @@ async def start(
             vhost_limits.timeout_seconds,
             vhost_limits.concurrency,
         )
+
+        def commit_cancelled_vhost_result(result: HarvestedVirtualHostResult) -> None:
+            vhost_observations.extend(
+                observation for observation in result.observations if observation.classification == 'distinct'
+            )
+
         try:
             sweep = await discover_harvested_virtual_hosts(
                 scope=vhost_scope,
@@ -2542,12 +2549,9 @@ async def start(
                 limits=vhost_limits,
                 insecure=args.vhost_insecure,
                 endpoint_override=vhost_endpoint,
+                commit_cancelled=commit_cancelled_vhost_result,
             )
-        except asyncio.CancelledError as error:
-            if isinstance(error, VirtualHostDiscoveryCancelled):
-                vhost_observations.extend(
-                    observation for observation in error.result.observations if observation.classification == 'distinct'
-                )
+        except asyncio.CancelledError as cancellation:
             confirmed_vhosts = confirmed_virtual_hostnames()
             action_executions.append(
                 ActionExecution.finish(
@@ -2559,8 +2563,22 @@ async def start(
                     stop_reason='cancelled',
                 )
             )
-            await persist_result(finish_completed_result(extra_hostnames=dnsrev))
-            raise
+            cancelled_result = finish_completed_result(extra_hostnames=dnsrev)
+
+            async def finish_cancellation_evidence() -> None:
+                try:
+                    if completed_result_checkpoint is not None and cancelled_result is not None:
+                        await completed_result_checkpoint(cancelled_result)
+                except (asyncio.CancelledError, Exception) as checkpoint_error:
+                    output_logger.info(f'[!] Virtual-host cancellation checkpoint failed: {checkpoint_error}')
+                try:
+                    await persist_result(cancelled_result)
+                except asyncio.CancelledError as persistence_error:
+                    output_logger.info(f'[!] Virtual-host cancellation persistence failed: {persistence_error}')
+
+            cleanup_task = asyncio.create_task(finish_cancellation_evidence(), name='vhost-cancellation-evidence')
+            await drain_tasks_after_cancellation((cleanup_task,), cancel=False)
+            raise cancellation
         except Exception as error:
             confirmed_vhosts = confirmed_virtual_hostnames()
             action_executions.append(
