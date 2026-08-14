@@ -318,7 +318,6 @@
     nodes.requestOptions.innerHTML = options.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
   }
 
-  function sourceName(execution) { return execution.source || 'Unknown source'; }
   function executionName(execution) { return execution.source || execution.action || 'Unknown producer'; }
   function executionKind(execution) { return execution.source ? 'Source' : execution.action ? 'Action' : 'Unknown'; }
   function credentialRequirement(source) {
@@ -332,12 +331,6 @@
     const errorType = execution.error_type;
     if (execution.stop_reason === 'missing-credentials') {
       return 'Required credentials were not configured; add them, then retry.';
-    }
-    if (execution.source && execution.status === 'skipped' && errorType === 'SourceDidNotStart') {
-      const requirement = credentialRequirement(state.sources.find(source => source.name === sourceName(execution)));
-      return requirement
-        ? `${requirement}. Source did not start; verify configuration or inspect the child log, then retry.`
-        : 'Source did not start; inspect the child log, then retry.';
     }
     return errorType || execution.stop_reason?.replaceAll('-', ' ') || '-';
   }
@@ -553,7 +546,7 @@
     } else if (run.status === 'completed') {
       const emptySources = (run.source_executions || [])
         .filter(execution => execution.status === 'completed' && Number(execution.result_count || 0) === 0)
-        .map(sourceName);
+        .map(execution => execution.source || 'Unknown source');
       let sourceSummary = 'No normalized evidence was returned.';
       if (emptySources.length === 1) sourceSummary = `${emptySources[0]} returned no normalized evidence.`;
       if (emptySources.length > 1) sourceSummary = `${emptySources.length} selected sources returned no normalized evidence.`;

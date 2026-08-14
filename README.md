@@ -163,6 +163,8 @@ The table shows which result types each source can add to consolidated CLI resul
 JSON and XML group findings by result type without source attribution. JSONL and SQLite retain source attribution when the collection adapter provides it. Empty optional fields may be omitted.
 BuiltWith's normalized frameworks, languages, servers, CMS products, and analytics products are retained in JSONL and completed-result SQLite rows.
 
+Contributors add an ordinary discovery provider with one catalog entry and one factory entry; the shared runner handles CLI execution, persistence, and output. See [the contributor module guide](docs/wiki/How-to-add-a-new-module.md).
+
 A checkmark means the source can add that result type. The **Additional action output** column lists optional actions that return other data.
 
 Read the **API key** column as follows:

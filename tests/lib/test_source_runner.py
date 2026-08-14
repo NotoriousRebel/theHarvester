@@ -778,11 +778,12 @@ async def test_parent_cancellation_commits_active_jobs_and_cleans_structured_tas
     jobs = tuple(SourceJob(SourceRequest(source, 'example.test', 25, 0, False, True)) for source in source_names)
     task = asyncio.create_task(run_source_jobs(jobs, commit=committed.append))
     await started.wait()
-    task.cancel()
+    task.cancel('parent-marker')
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as raised:
         await task
 
+    assert raised.value.args == ('parent-marker',)
     assert {outcome.execution.source for outcome in committed} == set(source_names)
     assert all(outcome.execution.stop_reason == 'cancelled' for outcome in committed)
     assert not [task for task in asyncio.all_tasks() if task.get_name().startswith('source:') and not task.done()]

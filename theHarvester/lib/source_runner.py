@@ -427,10 +427,10 @@ async def run_source_jobs(
             for index in range(min(workers, len(jobs))):
                 owned_tasks.append(group.create_task(worker(), name=f'source-worker:{index}'))
     except asyncio.CancelledError as error:
-        caught_cancellation = primary_cancellation or error
+        caught_cancellation = error
 
     if primary_cancellation is not None or caught_cancellation is not None:
-        cancellation = primary_cancellation or caught_cancellation
+        cancellation = caught_cancellation or primary_cancellation
         for index, outcome in enumerate(outcomes):
             if outcome is None:
                 request = jobs[index].request

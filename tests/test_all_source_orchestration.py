@@ -10,8 +10,8 @@ from uuid import UUID
 import pytest
 
 from theHarvester import __main__ as theharvester_main
-from theHarvester.lib import source_runner
-from theHarvester.lib.source_catalog import SOURCE_SPECS, ActivityClass
+from theHarvester.lib import source_catalog, source_runner
+from theHarvester.lib.source_catalog import SOURCE_SPECS, ActivityClass, ResultRoute, SourceSpec
 
 NON_PASSIVE_SOURCES = (
     'criminalip',
@@ -38,6 +38,46 @@ async def test_source_help_uses_the_runtime_catalog(
     help_output = capsys.readouterr().out
     assert 'catalog-only-source' in help_output
     assert 'linkedin_links' not in help_output
+
+
+@pytest.mark.asyncio
+async def test_catalog_and_factory_are_the_only_source_registration_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = 0
+
+    class FakeResultStore:
+        async def initialize(self) -> None:
+            return None
+
+        async def record_observations(self, *_args: object) -> None:
+            return None
+
+        async def save_run(self, _result: object) -> None:
+            return None
+
+    class CatalogOnlyAdapter:
+        async def process(self, _proxy: bool) -> None:
+            nonlocal runs
+            runs += 1
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'catalog.example.test'}
+
+    source = 'catalog-only-source'
+    spec = SourceSpec(source, frozenset({ResultRoute.SUBDOMAINS}))
+    monkeypatch.setitem(SOURCE_SPECS, source, spec)
+    monkeypatch.setitem(source_catalog._CASEFOLDED_SOURCE_SPECS, source, spec)
+    monkeypatch.setitem(source_runner.SOURCE_FACTORIES, source, lambda _request: CatalogOnlyAdapter())
+    monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.test', '-b', source])
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert runs == 1
 
 
 @pytest.mark.asyncio
