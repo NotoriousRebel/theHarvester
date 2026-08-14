@@ -286,7 +286,7 @@ class SearchWindvane:
                     await asyncio.sleep(0.1)  # Rate limiting
 
                     # Use a simple DNS lookup (non-blocking)
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     try:
                         result = await loop.run_in_executor(None, socket.gethostbyname, subdomain)
                         if result:
