@@ -61,6 +61,47 @@ async def test_cli_help_explains_proxy_and_direct_action_scope(
     assert 'For normal use, pass only --vhost; bounded safety defaults apply automatically.' in help_text
     assert 'virtual host advanced controls' in help_text
     assert 'Candidate names are never resolved through DNS.' in help_text
+    assert '-j' in help_text
+    assert '--source-workers SOURCE_WORKERS' in help_text
+
+
+@pytest.mark.asyncio
+async def test_cli_reports_requested_and_effective_source_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class EmptyCrtsh:
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return set()
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setitem(source_runner.SOURCE_FACTORIES, 'crtsh', lambda _request: EmptyCrtsh())
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        ['theHarvester', '-d', 'example.test', '-b', 'crtsh', '--source-workers', '7'],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 0
+    assert '[*] Source workers: requested=7; effective=1.' in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_cli_rejects_non_positive_source_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        ['theHarvester', '-d', 'example.test', '-b', 'crtsh', '--source-workers', '0'],
+    )
+
+    with pytest.raises(ValueError, match='--source-workers must be a positive integer'):
+        await theharvester_main.start()
 
 
 @pytest.mark.parametrize(
@@ -1630,7 +1671,8 @@ async def test_source_progress_waits_for_runner_admission(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     sources = ('certspotter', 'crt-name', 'crtsh', 'dymo')
-    admitted_sources = sources[: source_runner.SOURCE_WORKERS]
+    requested_workers = 3
+    admitted_sources = sources[:requested_workers]
     constructed: list[str] = []
     processing: set[str] = set()
     admitted = asyncio.Event()
@@ -1642,7 +1684,7 @@ async def test_source_progress_waits_for_runner_admission(
 
         async def process(self, _proxy: bool) -> None:
             processing.add(self.source)
-            if len(processing) == source_runner.SOURCE_WORKERS:
+            if len(processing) == requested_workers:
                 admitted.set()
             await release.wait()
 
@@ -1663,7 +1705,9 @@ async def test_source_progress_waits_for_runner_admission(
 
     task = asyncio.create_task(
         theharvester_main.start(
-            EnumerationOptions(domain='example.test', source=','.join(sources), quiet=False),
+            EnumerationOptions(
+                domain='example.test', source=','.join(sources), source_workers=requested_workers, quiet=False
+            ),
             return_completed_result=True,
         )
     )
@@ -1672,7 +1716,7 @@ async def test_source_progress_waits_for_runner_admission(
     release.set()
     await task
 
-    assert constructed[: source_runner.SOURCE_WORKERS] == list(admitted_sources)
+    assert constructed[:requested_workers] == list(admitted_sources)
     assert all(f'[*] Searching {source[0].upper() + source[1:]}.' in interim_output for source in admitted_sources)
     assert '[*] Searching Dymo.' not in interim_output
 
@@ -1740,6 +1784,7 @@ async def test_source_cancellation_does_not_announce_never_started_queued_source
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     sources = ('certspotter', 'crt-name', 'crtsh', 'dymo')
+    requested_workers = 3
     cancellation = asyncio.CancelledError('source cancelled')
     constructed: list[str] = []
     processing: set[str] = set()
@@ -1751,7 +1796,7 @@ async def test_source_cancellation_does_not_announce_never_started_queued_source
 
         async def process(self, _proxy: bool) -> None:
             processing.add(self.source)
-            if len(processing) == source_runner.SOURCE_WORKERS:
+            if len(processing) == requested_workers:
                 admitted.set()
             await admitted.wait()
             if self.source == sources[0]:
@@ -1776,13 +1821,15 @@ async def test_source_cancellation_does_not_announce_never_started_queued_source
     with pytest.raises(asyncio.CancelledError) as raised:
         async with asyncio.timeout(1):
             await theharvester_main.start(
-                EnumerationOptions(domain='example.test', source=','.join(sources), quiet=False),
+                EnumerationOptions(
+                    domain='example.test', source=','.join(sources), source_workers=requested_workers, quiet=False
+                ),
                 return_completed_result=True,
             )
 
     output = capsys.readouterr().out
     assert raised.value is cancellation
-    assert constructed == list(sources[: source_runner.SOURCE_WORKERS])
+    assert constructed == list(sources[:requested_workers])
     assert '[*] Searching Dymo.' not in output
 
 

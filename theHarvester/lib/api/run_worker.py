@@ -17,6 +17,7 @@ from theHarvester.lib.enumeration import (
     DEFAULT_DNS_RECURSIVE_QUERY_LIMIT,
     DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS,
     DEFAULT_RESULT_START,
+    DEFAULT_SOURCE_WORKERS,
     EnumerationOptions,
 )
 from theHarvester.lib.resolver_selection import DEFAULT_DNS_RESOLVERS
@@ -561,6 +562,7 @@ async def _child_execute(run_id: str, database: Path) -> None:
         screenshot=str(screenshot_dir) if request.get('screenshot') else '',
         shodan=request.get('shodan', False),
         source=','.join(request['sources']),
+        source_workers=request.get('source_workers', DEFAULT_SOURCE_WORKERS),
         start=request.get('start', DEFAULT_RESULT_START),
         take_over=request.get('takeover', False),
         vhost=request.get('vhost', False),

@@ -42,6 +42,10 @@ Query several passive sources:
 uv run theHarvester -d example.com -b crtsh,certspotter,commoncrawl
 ```
 
+Discovery uses six source workers by default. Set `-j` / `--source-workers` to a positive count; the effective count is
+clamped to selected sources and changes concurrency only, never which sources or results complete. REST `source_workers`
+and HarvestView's advanced control use the same setting. See [the benchmark record](docs/benchmarks/source-workers.md).
+
 Run every source that can contribute subdomains:
 
 ```bash
