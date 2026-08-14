@@ -19,7 +19,6 @@ NON_PASSIVE_SOURCES = (
     'shodan',
     'shodanInternetDB',
     'subdomainfinderc99',
-    'windvane',
 )
 
 
@@ -218,7 +217,6 @@ async def test_explicit_non_passive_source_is_scheduled_once(
             'pentesttools': (source_runner.pentesttools, 'SearchPentestTools'),
             'shodanInternetDB': (source_runner.shodan_internetdb, 'SearchShodanInternetDB'),
             'subdomainfinderc99': (source_runner.subdomainfinderc99, 'SearchSubdomainfinderc99'),
-            'windvane': (source_runner.windvane, 'SearchWindvane'),
         }[source]
         monkeypatch.setattr(module, constructor_name, lambda *_args, **_kwargs: FakeAdapter())
 
