@@ -3017,6 +3017,7 @@ async def start(
 
             api_scan_error = api_scanner.scan_error_type
             api_request_errors = api_scanner.request_error_count
+            scanner_stop_reason = getattr(api_scanner, 'stop_reason', None)
             api_scan_status: ExecutionStatus = 'completed'
             api_error_type = None
             api_stop_reason = None
@@ -3024,13 +3025,17 @@ async def start(
                 api_scan_status = 'partial' if any(api_action_groups.values()) else 'failed'
                 api_error_type = api_scan_error
                 api_stop_reason = 'scan-error'
-            elif rate_limits:
-                api_scan_status = 'rate-limited'
-                api_stop_reason = 'rate-limited'
+            elif scanner_stop_reason in {'request-limit', 'runtime-limit', 'response-limit'}:
+                api_scan_status = 'partial' if any(api_action_groups.values()) else 'failed'
+                api_error_type = next(iter(sorted(api_scanner.request_error_types)), None)
+                api_stop_reason = scanner_stop_reason
             elif api_request_errors:
                 api_scan_status = 'partial'
                 api_error_type = next(iter(sorted(api_scanner.request_error_types)), None)
                 api_stop_reason = 'request-errors'
+            elif rate_limits:
+                api_scan_status = 'rate-limited'
+                api_stop_reason = 'rate-limited'
             action_executions.append(
                 ActionExecution.finish(
                     action='api-scan',
@@ -3042,7 +3047,10 @@ async def start(
                 )
             )
 
-            output_logger.info('\n[+] API scanning completed successfully.')
+            if api_stop_reason is None:
+                output_logger.info('\n[+] API scanning completed successfully.')
+            else:
+                output_logger.info(f'\n[!] API scanning stopped with reason: {api_stop_reason}.')
 
         except asyncio.CancelledError:
             if not any(execution.action == 'api-scan' for execution in action_executions):

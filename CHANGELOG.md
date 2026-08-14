@@ -77,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Bounded bulk HTTP fetches to a fixed worker count with deterministic result ordering, proxy-safe routing, and awaited cleanup on failure or cancellation.
+- Bounded API endpoint scans with reusable transport, finite request/runtime/cumulative-body limits, deterministic results, and capped rate-limit retries.
 - Guaranteed durable run child/helper cleanup across failures and cancellation, capped captured output with explicit truncation markers, and prevented queued-run wakeups from being lost.
 - Sent a stable, versioned theHarvester identity with provider and API requests while preserving explicit browser identities for sources that require them.
 - Kept API endpoint scan URLs canonical instead of prefixing targets onto already complete URLs.
