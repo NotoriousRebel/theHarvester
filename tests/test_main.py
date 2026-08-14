@@ -3591,16 +3591,7 @@ async def test_shodan_no_data_is_a_completed_zero_yield_action(monkeypatch: pyte
         (None, 3, False, None, None, 'partial', 'TransportError', 'request-errors'),
         (None, 0, True, None, None, 'rate-limited', None, 'rate-limited'),
         (None, 0, False, 'request-limit', None, 'failed', None, 'request-limit'),
-        (
-            None,
-            1,
-            False,
-            'response-limit',
-            'https://example.com/api',
-            'partial',
-            'ResponseLimitError',
-            'response-limit',
-        ),
+        (None, 1, False, None, 'https://example.com/api', 'partial', 'ResponseLimitError', 'request-errors'),
     ],
 )
 async def test_api_scan_records_suppressed_scan_failure(
@@ -3618,9 +3609,7 @@ async def test_api_scan_records_suppressed_scan_failure(
     class FailedApiScanner:
         scan_error_type = scan_error
         request_error_count = request_errors
-        request_error_types = (
-            {'ResponseLimitError' if scanner_reason == 'response-limit' else 'TransportError'} if request_errors else set()
-        )
+        request_error_types = {'ResponseLimitError' if result_url else 'TransportError'} if request_errors else set()
         stop_reason = scanner_reason
 
         def __init__(self, word: str, wordlist: str, exact_paths: bool = False) -> None:
