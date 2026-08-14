@@ -53,6 +53,27 @@ async def test_check_deduplicates_candidates_and_bounds_active_hostnames(monkeyp
     assert closed
 
 
+@pytest.mark.asyncio
+async def test_check_default_limits_process_more_than_former_query_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResolver:
+        async def query_dns(self, host: str, record_type: str):
+            if record_type == 'A':
+                return SimpleNamespace(answer=[SimpleNamespace(data=SimpleNamespace(addr='192.0.2.10'))])
+            raise hostchecker.aiodns.error.DNSError(hostchecker.aiodns.error.ARES_ENODATA, 'no data')
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(hostchecker.aiodns, 'DNSResolver', lambda **_kwargs: FakeResolver())
+    checker = hostchecker.Checker([f'host-{index}.example.com' for index in range(1_001)], nameservers=[])
+
+    _resolved, hosts, _addresses = await checker.check()
+
+    assert len(hosts) == checker.completed_count == 1_001
+    assert checker.request_count == 3_003
+    assert checker.stop_reason is None
+
+
 @pytest.mark.parametrize(
     ('option', 'value', 'message'),
     [
@@ -329,7 +350,7 @@ async def test_dns_force_admits_every_candidate_without_source_validation_limits
     monkeypatch.setattr(dnssearch.hostchecker, 'Checker', FakeChecker)
     dns_force = dnssearch.DnsForce('example.com', ['192.0.2.53'])
 
-    assert len(dns_force.list) > hostchecker.DEFAULT_DNS_REQUEST_LIMIT // 3
+    assert len(dns_force.list) > 1_000
     assert await dns_force.run() == ([], [], [])
     assert admitted == dns_force.list
     assert dns_force.completed_count == len(dns_force.list)
@@ -558,6 +579,28 @@ async def test_reverse_ranges_stop_at_query_budget_with_partial_evidence(monkeyp
     assert result.request_count == 1
     assert result.completed_count == 1
     assert result.stop_reason == 'query-limit'
+
+
+@pytest.mark.asyncio
+async def test_reverse_defaults_process_more_than_former_candidate_ceiling_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResolver:
+        async def gethostbyaddr(self, _ip: str):
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        dnssearch,
+        'iter_ips_in_network_range',
+        lambda _range: (f'192.0.{index // 255}.{index % 255}' for index in range(1, 3_002)),
+    )
+    monkeypatch.setattr(dnssearch, 'DNSResolver', lambda **_kwargs: FakeResolver())
+    monkeypatch.setattr(dnssearch, 'log_query', lambda _ip: None)
+
+    result = await dnssearch.reverse_ip_ranges(('large-range',), lambda _host: None)
+
+    assert result == dnssearch.ReverseDNSResult(3_001, 3_001)
 
 
 @pytest.mark.asyncio

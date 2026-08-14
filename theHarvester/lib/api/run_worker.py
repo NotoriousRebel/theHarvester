@@ -14,8 +14,6 @@ from weakref import WeakKeyDictionary, WeakSet
 import anyio
 
 from theHarvester.lib.enumeration import (
-    DEFAULT_DNS_RECURSIVE_QUERY_LIMIT,
-    DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS,
     DEFAULT_RESULT_START,
     DEFAULT_SOURCE_WORKERS,
     EnumerationOptions,
@@ -547,8 +545,8 @@ async def _child_execute(run_id: str, database: Path) -> None:
         dns_brute=request.get('dns_brute', False),
         dns_lookup=request.get('dns_lookup', False),
         dns_recursive_depth=recursive_depth,
-        dns_recursive_query_limit=request.get('dns_recursive_query_limit', DEFAULT_DNS_RECURSIVE_QUERY_LIMIT),
-        dns_recursive_runtime_seconds=request.get('dns_recursive_runtime_seconds', DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS),
+        dns_recursive_query_limit=request.get('dns_recursive_query_limit'),
+        dns_recursive_runtime_seconds=request.get('dns_recursive_runtime_seconds'),
         dns_resolve=','.join(resolver_list) if request.get('dns_resolve') else '',
         dns_resolvers=tuple(resolver_list),
         dns_server=None,
