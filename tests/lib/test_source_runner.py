@@ -41,22 +41,42 @@ def test_source_factories_match_the_catalog() -> None:
 
 
 @pytest.mark.parametrize(
-    ('source', 'patch_target', 'expected'),
+    ('source', 'patch_target', 'expected_args', 'expected_kwargs'),
     [
-        ('crtsh', 'theHarvester.lib.source_runner.crtsh.SearchCrtsh', ('example.test',)),
-        ('apis-guru', 'theHarvester.lib.source_runner.apisguru.SearchApisGuru', ('example.test', 25)),
-        ('builtwith', 'theHarvester.lib.source_runner.builtwith.SearchBuiltWith', ('example.test',)),
-        ('hudsonrock', 'theHarvester.lib.source_runner.hudsonrocksearch.SearchHudsonRock', ('example.test',)),
-        ('hunter', 'theHarvester.lib.source_runner.huntersearch.SearchHunter', ('example.test', 25, 5)),
-        ('dehashed', 'theHarvester.lib.source_runner.search_dehashed.SearchDehashed', ('example.test', 25)),
-        ('shodan', 'theHarvester.lib.source_runner.shodansearch.SearchShodan', ('example.test',)),
+        ('crtsh', 'theHarvester.lib.source_runner.crtsh.SearchCrtsh', ('example.test',), {}),
+        ('apis-guru', 'theHarvester.lib.source_runner.apisguru.SearchApisGuru', ('example.test', 25), {}),
+        ('arquivo', 'theHarvester.lib.source_runner.arquivo.SearchArquivo', ('example.test', 25), {}),
+        ('baidu', 'theHarvester.lib.source_runner.baidusearch.SearchBaidu', ('example.test', 25), {}),
+        ('brave', 'theHarvester.lib.source_runner.bravesearch.SearchBrave', ('example.test', 25), {}),
+        ('builtwith', 'theHarvester.lib.source_runner.builtwith.SearchBuiltWith', ('example.test',), {}),
+        ('censys', 'theHarvester.lib.source_runner.censysearch.SearchCensys', ('example.test', 25), {}),
+        ('commoncrawl', 'theHarvester.lib.source_runner.commoncrawl.SearchCommoncrawl', ('example.test', 25), {}),
+        ('dehashed', 'theHarvester.lib.source_runner.search_dehashed.SearchDehashed', ('example.test',), {'limit': 25}),
+        ('github-code', 'theHarvester.lib.source_runner.githubcode.SearchGithubCode', ('example.test', 25), {}),
+        ('hudsonrock', 'theHarvester.lib.source_runner.hudsonrocksearch.SearchHudsonRock', ('example.test',), {}),
+        ('hunter', 'theHarvester.lib.source_runner.huntersearch.SearchHunter', ('example.test', 25, 5), {}),
+        ('mojeek', 'theHarvester.lib.source_runner.mojeek.SearchMojeek', ('example.test', 25), {}),
+        ('netlas', 'theHarvester.lib.source_runner.netlas.SearchNetlas', ('example.test', 25), {}),
+        ('rocketreach', 'theHarvester.lib.source_runner.rocketreach.SearchRocketReach', ('example.test', 25), {}),
+        ('shodan', 'theHarvester.lib.source_runner.shodansearch.SearchShodan', ('example.test',), {}),
+        ('sourcegraph', 'theHarvester.lib.source_runner.sourcegraph.SearchSourcegraph', ('example.test', 25), {}),
+        ('tomba', 'theHarvester.lib.source_runner.tombasearch.SearchTomba', ('example.test', 25, 5), {}),
+        (
+            'waybackarchive',
+            'theHarvester.lib.source_runner.waybackarchive.SearchWaybackarchive',
+            ('example.test', 25),
+            {},
+        ),
+        ('yahoo', 'theHarvester.lib.source_runner.yahoosearch.SearchYahoo', ('example.test', 25), {}),
+        ('zoomeye', 'theHarvester.lib.source_runner.zoomeyesearch.SearchZoomEye', ('example.test', 25), {}),
     ],
 )
 def test_factory_constructor_shapes(
     monkeypatch: pytest.MonkeyPatch,
     source: str,
     patch_target: str,
-    expected: tuple[object, ...],
+    expected_args: tuple[object, ...],
+    expected_kwargs: dict[str, object],
 ) -> None:
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -68,8 +88,7 @@ def test_factory_constructor_shapes(
 
     create_source(SourceRequest(source, 'example.test', 25, 5, True, False))
 
-    flattened = (*calls[0][0], *calls[0][1].values())
-    assert flattened == expected
+    assert calls == [(expected_args, expected_kwargs)]
 
 
 @pytest.mark.asyncio
