@@ -14,8 +14,8 @@ The following options require additional care:
 
 | Option | Behavior |
 | --- | --- |
-| `-r`, `--dns-resolve` | Deduplicates discovered names, then resolves A, AAAA, and CNAME records once per name through one scan-wide phase capped at 20 active hostname jobs, 3,000 record queries, and 60 seconds. |
-| `-n`, `--dns-lookup` | Deduplicates addresses across discovered `/24` ranges, then performs reverse DNS through a separate scan-wide phase capped at 20 active PTR jobs, 3,000 requests, and 60 seconds. |
+| `-r`, `--dns-resolve` | Deduplicates discovered names, then resolves A, AAAA, and CNAME records once per name through one scan-wide phase with at most 20 active hostname jobs and per-query resolver timeouts; it has no default query-count or phase-runtime ceiling. |
+| `-n`, `--dns-lookup` | Deduplicates addresses across discovered `/24` ranges, then performs reverse DNS through a separate scan-wide phase with at most 20 active PTR jobs and per-query resolver timeouts; it has no default request-count or phase-runtime ceiling. |
 | `-c`, `--dns-brute` | Tries candidate subdomains against DNS. |
 | `-t`, `--take-over` | Checks discovered hosts for takeover indicators. |
 | `-s`, `--shodan` | Enriches discovered hosts through Shodan. |

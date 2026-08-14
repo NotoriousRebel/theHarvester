@@ -16,8 +16,8 @@ import aiodns
 from theHarvester.lib.cancellation import drain_tasks_after_cancellation
 
 DEFAULT_DNS_CONCURRENCY = 20
-DEFAULT_DNS_REQUEST_LIMIT = 3_000
-DEFAULT_DNS_RUNTIME_SECONDS = 60.0
+DEFAULT_DNS_REQUEST_LIMIT = None
+DEFAULT_DNS_RUNTIME_SECONDS = None
 
 
 @dataclass(frozen=True)

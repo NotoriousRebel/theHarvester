@@ -114,14 +114,14 @@ class RunRequest(BaseModel):
         default=False,
         description=(
             'Reverse DNS across discovered IPv4 /24 ranges through one deduplicated job set capped at 20 active '
-            'PTR jobs, 3,000 requests, and 60 seconds.'
+            'PTR jobs. Query and runtime limits are unlimited by default.'
         ),
     )
     dns_resolve: bool = Field(
         default=False,
         description=(
             'Validate deduplicated discovered hostnames once per A, AAAA, and CNAME record through one scan-wide '
-            'phase capped at 20 active hostname jobs, 3,000 record queries, and 60 seconds.'
+            'phase capped at 20 active hostname jobs. Query and runtime limits are unlimited by default.'
         ),
     )
     dns_resolvers: list[str] = Field(
@@ -134,12 +134,12 @@ class RunRequest(BaseModel):
         ge=0,
         description='Maximum recursive label depth. Zero disables recursive DNS discovery.',
     )
-    dns_recursive_query_limit: int = Field(
+    dns_recursive_query_limit: int | None = Field(
         default=DEFAULT_DNS_RECURSIVE_QUERY_LIMIT,
         gt=0,
         description='Maximum DNS record queries shared across all three resolver vantages.',
     )
-    dns_recursive_runtime_seconds: float = Field(
+    dns_recursive_runtime_seconds: float | None = Field(
         default=DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS,
         gt=0,
         allow_inf_nan=False,

@@ -49,6 +49,10 @@ def test_harvestview_assets_load_outside_the_repository_directory(tmp_path, monk
     assert response.status_code == 200
     assert 'function renderResults' in response.text
     assert "source_workers: Number(form.get('source_workers'))" in response.text
+    assert "request.dns_recursive_query_limit === null ? 'Unlimited'" in response.text
+    assert "request.dns_recursive_query_limit === undefined ? 'Not recorded'" in response.text
+    assert "request.dns_recursive_runtime_seconds === null ? 'Unlimited'" in response.text
+    assert "request.dns_recursive_runtime_seconds === undefined ? 'Not recorded'" in response.text
 
 
 def test_harvestview_offers_jsonl_and_sqlite_imports_with_jsonl_export(tmp_path, monkeypatch) -> None:

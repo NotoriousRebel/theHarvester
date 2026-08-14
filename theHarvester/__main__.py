@@ -238,8 +238,8 @@ async def start(
         '--dns-resolve',
         help=(
             'Resolve discovered hostnames. Pass comma-separated resolver IPs or a text file with one IP per line; '
-            'omit the value to use defaults. One scan-wide phase uses at most 20 hostname jobs, 3,000 record queries, '
-            'and 60 seconds.'
+            'omit the value to use defaults. One scan-wide phase uses at most 20 hostname jobs; its query and runtime '
+            'limits are unlimited by default.'
         ),
         default='',
         type=str,
@@ -260,8 +260,8 @@ async def start(
         '--dns-lookup',
         help=(
             'Perform PTR lookups across the /24 network containing each discovered IPv4 address. Addresses are '
-            'deduplicated; one scan-wide phase uses at most 20 active jobs, 3,000 requests, and 60 seconds. This sends '
-            'active DNS queries.'
+            'deduplicated; one scan-wide phase uses at most 20 active jobs with no default request or runtime ceiling. '
+            'This sends active DNS queries.'
         ),
         default=False,
         action='store_true',
@@ -515,7 +515,7 @@ async def start(
         recursive_limits = RecursiveDNSLimits(
             depth=recursive_depth,
             query_limit=getattr(args, 'dns_recursive_query_limit', DEFAULT_RECURSIVE_DNS_QUERY_LIMIT),
-            runtime_seconds=getattr(args, 'dns_recursive_runtime_seconds', 60.0),
+            runtime_seconds=getattr(args, 'dns_recursive_runtime_seconds', DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS),
         )
 
     engines: list = []
