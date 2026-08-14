@@ -230,7 +230,8 @@ async def start(
         '--dns-resolve',
         help=(
             'Resolve discovered hostnames. Pass comma-separated resolver IPs or a text file with one IP per line; '
-            'omit the value to use defaults.'
+            'omit the value to use defaults. One scan-wide phase uses at most 20 hostname jobs, 3,000 record queries, '
+            'and 60 seconds.'
         ),
         default='',
         type=str,
@@ -250,7 +251,9 @@ async def start(
         '-n',
         '--dns-lookup',
         help=(
-            'Perform PTR lookups across the /24 network containing each discovered IPv4 address. This sends active DNS queries.'
+            'Perform PTR lookups across the /24 network containing each discovered IPv4 address. Addresses are '
+            'deduplicated; one scan-wide phase uses at most 20 active jobs, 3,000 requests, and 60 seconds. This sends '
+            'active DNS queries.'
         ),
         default=False,
         action='store_true',
@@ -558,6 +561,7 @@ async def start(
     dns_resolution_error_types: set[str] = set()
     dns_resolution_failure_types: set[str] = set()
     dns_resolution_cancelled = False
+    dns_resolution_stop_reason: str | None = None
 
     def confirmed_virtual_hostnames() -> list[str]:
         return sorted({observation.hostname for observation in vhost_observations})
@@ -709,6 +713,10 @@ async def start(
         elif dns_resolution_failure_types:
             status = 'partial' if dns_resolution_completed_count else 'failed'
             error_type = next(iter(sorted(dns_resolution_failure_types)))
+        elif dns_resolution_stop_reason is not None:
+            status = 'partial' if dns_resolution_completed_count else 'failed'
+            error_type = next(iter(sorted(dns_resolution_error_types)), None)
+            stop_reason = dns_resolution_stop_reason
         elif dns_resolution_completed_count:
             status = 'partial' if dns_resolution_query_error_count else 'completed'
             error_type = next(iter(sorted(dns_resolution_error_types)), None)
@@ -739,9 +747,6 @@ async def start(
         :param search_engine: search engine to fetch details from
         :param source_spec: canonical source identity and declared result routes
         """
-        nonlocal dns_resolution_cancelled, dns_resolution_completed_count
-        nonlocal dns_resolution_duration_ms, dns_resolution_query_error_count
-
         source = source_spec.name
         routes = source_spec.routes
         if source:
@@ -756,38 +761,6 @@ async def start(
         if collect_hosts and ResultRoute.SUBDOMAINS in routes:
             discovered_hosts = await search_engine.get_hostnames()
             host_names = list(_normalize_hosts_for_storage(discovered_hosts, word))
-            if source_spec.requires_hostname_resolution:
-                if dnsresolve != '' and host_names:
-                    # indicates that -r was passed in if dnsresolve is None
-                    dns_resolution_started = time.perf_counter()
-                    try:
-                        full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
-                        # If full, this is only getting resolved hosts
-                        (
-                            resolved_pair,
-                            resolved_hosts,
-                            temp_ips,
-                        ) = await full_hosts_checker.check()
-                    except asyncio.CancelledError:
-                        dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
-                        dns_resolution_cancelled = True
-                        raise
-                    except Exception as error:
-                        dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
-                        dns_resolution_failure_types.add(type(error).__name__)
-                        raise
-                    dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
-                    dns_resolution_completed_count += 1
-                    dns_resolution_query_error_count += getattr(full_hosts_checker, 'query_error_count', 0)
-                    dns_resolution_error_types.update(getattr(full_hosts_checker, 'query_error_types', set()))
-                    dns_resolution_ips.update(_normalize_ip_addresses(temp_ips))
-                    all_ip.extend(temp_ips)
-                    full.extend(resolved_pair)
-                    resolved_screenshot_hosts.update(resolved_hosts)
-                else:
-                    full.extend(host_names)
-            else:
-                full.extend(host_names)
             all_hosts.extend(host_names)
             record_source_observations(source, 'hostname', host_names)
 
@@ -938,43 +911,64 @@ async def start(
             elif observation.kind == 'infostealer':
                 all_infostealers.append(json.loads(observation.value))
 
-    async def resolve_source_outcome_hostnames(outcome: SourceOutcome) -> None:
+    async def resolve_source_hostnames() -> None:
         nonlocal dns_resolution_cancelled, dns_resolution_completed_count
-        nonlocal dns_resolution_duration_ms, dns_resolution_query_error_count
+        nonlocal dns_resolution_duration_ms, dns_resolution_query_error_count, dns_resolution_stop_reason
 
-        host_names = [item.value for item in outcome.observations if item.kind == 'hostname']
+        hostname_observations = tuple(item for item in observations if item.kind == 'hostname')
+        host_names = sorted(
+            {item.value for item in hostname_observations if get_source_spec(item.source).requires_hostname_resolution}
+        )
+        already_resolved = sorted(
+            {item.value for item in hostname_observations if not get_source_spec(item.source).requires_hostname_resolution}
+        )
+        if dnsresolve == '':
+            full.extend(sorted({item.value for item in hostname_observations}))
+            return
+        full.extend(already_resolved)
+        if dnsresolve is not None and not final_dns_resolver_list:
+            return
         if not host_names:
             return
-        if not get_source_spec(outcome.execution.source).requires_hostname_resolution or dnsresolve == '':
-            full.extend(host_names)
-            return
         dns_resolution_started = time.perf_counter()
+        full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
+
+        def retain_results(results: tuple[list[str], list[str], list[str]]) -> None:
+            resolved_pair, resolved_hosts, temp_ips = results
+            dns_resolution_ips.update(_normalize_ip_addresses(temp_ips))
+            all_ip.extend(temp_ips)
+            full.extend(resolved_pair)
+            resolved_screenshot_hosts.update(resolved_hosts)
+
         try:
-            full_hosts_checker = hostchecker.Checker(host_names, final_dns_resolver_list)
-            resolved_pair, resolved_hosts, temp_ips = await full_hosts_checker.check()
+            retain_results(await full_hosts_checker.check())
         except asyncio.CancelledError:
             dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
             dns_resolution_cancelled = True
+            if snapshot := getattr(full_hosts_checker, 'snapshot', None):
+                retain_results(snapshot())
+            dns_resolution_completed_count += getattr(full_hosts_checker, 'completed_count', 0)
+            dns_resolution_query_error_count += getattr(full_hosts_checker, 'query_error_count', 0)
+            dns_resolution_error_types.update(getattr(full_hosts_checker, 'query_error_types', set()))
             raise
         except Exception as error:
             dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
             dns_resolution_failure_types.add(type(error).__name__)
-            output_logger.info(
-                f'\n An error occurred while resolving {outcome.execution.source} hostnames: {type(error).__name__}: {error}\n'
-            )
+            if snapshot := getattr(full_hosts_checker, 'snapshot', None):
+                retain_results(snapshot())
+            dns_resolution_completed_count += getattr(full_hosts_checker, 'completed_count', 0)
+            dns_resolution_query_error_count += getattr(full_hosts_checker, 'query_error_count', 0)
+            dns_resolution_error_types.update(getattr(full_hosts_checker, 'query_error_types', set()))
+            output_logger.info(f'\n An error occurred while resolving hostnames: {type(error).__name__}: {error}\n')
             return
         dns_resolution_duration_ms += (time.perf_counter() - dns_resolution_started) * 1000
-        dns_resolution_completed_count += 1
+        dns_resolution_completed_count += getattr(full_hosts_checker, 'completed_count', len(host_names))
         dns_resolution_query_error_count += getattr(full_hosts_checker, 'query_error_count', 0)
         dns_resolution_error_types.update(getattr(full_hosts_checker, 'query_error_types', set()))
-        dns_resolution_ips.update(_normalize_ip_addresses(temp_ips))
-        all_ip.extend(temp_ips)
-        full.extend(resolved_pair)
-        resolved_screenshot_hosts.update(resolved_hosts)
+        dns_resolution_stop_reason = getattr(full_hosts_checker, 'stop_reason', None)
 
     async def finish_source_outcome(outcome: SourceOutcome) -> None:
         try:
-            await resolve_source_outcome_hostnames(outcome)
             await checkpoint_completed_result(committed_sources_only=True)
         except asyncio.CancelledError:
             raise
@@ -1287,6 +1281,7 @@ async def start(
 
     try:
         await handler(stor_lst)
+        await resolve_source_hostnames()
     except asyncio.CancelledError:
         record_dns_resolution_execution(handler_cancelled=True)
         await checkpoint_completed_result(committed_sources_only=True)
@@ -1625,8 +1620,11 @@ async def start(
             output_logger.info(sub)
         dns_brute_error_count = getattr(dns_force, 'query_error_count', 0)
         dns_brute_error_types: set[str] = set(getattr(dns_force, 'query_error_types', set()))
+        dns_brute_stop_reason = getattr(dns_force, 'stop_reason', None)
         dns_brute_status: ExecutionStatus = 'completed'
-        if dns_brute_error_count:
+        if dns_brute_stop_reason is not None:
+            dns_brute_status = 'partial' if getattr(dns_force, 'completed_count', 0) else 'failed'
+        elif dns_brute_error_count:
             dns_brute_status = 'partial'
         action_executions.append(
             ActionExecution.finish(
@@ -1635,7 +1633,7 @@ async def start(
                 duration_ms=(time.perf_counter() - dns_brute_started) * 1000,
                 groups={'hostname': normalized_brute_hosts, 'ip': normalized_brute_ips},
                 error_type=next(iter(sorted(dns_brute_error_types)), None),
-                stop_reason='query-errors' if dns_brute_error_count else None,
+                stop_reason=dns_brute_stop_reason or ('query-errors' if dns_brute_error_count else None),
             )
         )
         await checkpoint_completed_result()
@@ -1788,32 +1786,24 @@ async def start(
         dns_lookup_error_types: set[str] = set()
         output_logger.info('\n[*] Starting active queries for DNSLookup.')
 
-        # reverse each iprange in a separate task
-        __reverse_dns_tasks: dict[str, asyncio.Task[None]] = {}
+        reverse_ranges: set[str] = set()
         for entry in host_ip:
             __ip_range = dnssearch.serialize_ip_range(ip=entry, netmask='24')
-            if __ip_range and __ip_range not in set(__reverse_dns_tasks.keys()):
-                output_logger.info('\n[*] Performing reverse lookup on ' + __ip_range)
-                __reverse_dns_tasks[__ip_range] = asyncio.create_task(
-                    dnssearch.reverse_all_ips_in_range(
-                        iprange=__ip_range,
-                        callback=dnssearch.generate_postprocessing_callback(
-                            target=word, local_results=dnsrev, overall_results=full
-                        ),
-                        nameservers=(final_dns_resolver_list if len(final_dns_resolver_list) > 0 else None),
-                        error_types=dns_lookup_error_types,
-                    )
-                )
-                # nameservers=list(map(str, dnsserver.split(','))) if dnsserver else None))
+            if __ip_range:
+                reverse_ranges.add(__ip_range)
+        for iprange in sorted(reverse_ranges):
+            output_logger.info('\n[*] Performing reverse lookup on ' + iprange)
 
-        # run all the reversing tasks concurrently
+        reverse_result = None
         try:
-            await asyncio.gather(*__reverse_dns_tasks.values())
+            if reverse_ranges:
+                reverse_result = await dnssearch.reverse_ip_ranges(
+                    tuple(sorted(reverse_ranges)),
+                    dnssearch.generate_postprocessing_callback(target=word, local_results=dnsrev, overall_results=full),
+                    nameservers=(final_dns_resolver_list or None),
+                    error_types=dns_lookup_error_types,
+                )
         except (asyncio.CancelledError, Exception) as error:
-            for task in __reverse_dns_tasks.values():
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*__reverse_dns_tasks.values(), return_exceptions=True)
             normalized_reverse_hosts = _normalize_hosts_for_storage(dnsrev, word)
             action_executions.append(
                 ActionExecution.finish(
@@ -1835,9 +1825,12 @@ async def start(
         normalized_reverse_hosts = _normalize_hosts_for_storage(dnsrev, word)
         dns_lookup_status: ExecutionStatus = 'completed'
         dns_lookup_stop_reason = None
-        if not __reverse_dns_tasks:
+        if not reverse_ranges:
             dns_lookup_status = 'skipped'
             dns_lookup_stop_reason = 'no-input'
+        elif reverse_result is not None and reverse_result.stop_reason is not None:
+            dns_lookup_status = 'partial' if reverse_result.completed_count else 'failed'
+            dns_lookup_stop_reason = reverse_result.stop_reason
         elif dns_lookup_error_types:
             dns_lookup_status = 'partial'
             dns_lookup_stop_reason = 'query-errors'

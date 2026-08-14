@@ -105,11 +105,17 @@ class RunRequest(BaseModel):
     dns_brute: bool = Field(default=False, description='Try wordlist candidates below the authorized target through DNS.')
     dns_lookup: bool = Field(
         default=False,
-        description="Perform reverse DNS lookup across each discovered IPv4 address's /24 network.",
+        description=(
+            'Reverse DNS across discovered IPv4 /24 ranges through one deduplicated job set capped at 20 active '
+            'PTR jobs, 3,000 requests, and 60 seconds.'
+        ),
     )
     dns_resolve: bool = Field(
         default=False,
-        description='Validate discovered hostnames through the configured resolver addresses.',
+        description=(
+            'Validate deduplicated discovered hostnames once per A, AAAA, and CNAME record through one scan-wide '
+            'phase capped at 20 active hostname jobs, 3,000 record queries, and 60 seconds.'
+        ),
     )
     dns_resolvers: list[str] = Field(
         default_factory=lambda: list(DEFAULT_DNS_RESOLVERS),

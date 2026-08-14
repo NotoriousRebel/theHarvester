@@ -906,7 +906,7 @@ async def test_cli_api_wordlist_does_not_replace_dns_brute_candidates(
         query_error_count = 0
         query_error_types: ClassVar[set[str]] = set()
 
-        def __init__(self, hosts: list[str], nameservers: list[str]) -> None:
+        def __init__(self, hosts: list[str], nameservers: list[str], **_kwargs: object) -> None:
             checked_hosts.append(hosts)
 
         async def check(self) -> tuple[list[str], list[str], list[str]]:
@@ -965,6 +965,34 @@ async def test_dns_brute_query_errors_are_partial_even_without_findings(monkeypa
     assert execution.result_count == 0
     assert execution.error_type == 'TimeoutError'
     assert execution.stop_reason == 'query-errors'
+
+
+@pytest.mark.asyncio
+async def test_dns_brute_never_reports_a_budget_truncation_as_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LimitedDnsForce:
+        query_error_count = 0
+        query_error_types: ClassVar[set[str]] = set()
+        completed_count = 1_000
+        stop_reason = 'query-limit'
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run(self) -> tuple[list[str], list[str], list[str]]:
+            return [], [], []
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(theharvester_main.dnssearch, 'DnsForce', LimitedDnsForce)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(domain='example.com', source='', dns_brute=True, quiet=True),
+        return_completed_result=True,
+    )
+
+    execution = response[-1].active_evidence.executions[0]
+    assert execution.status == 'partial'
+    assert execution.error_type is None
+    assert execution.stop_reason == 'query-limit'
 
 
 @pytest.mark.asyncio
@@ -1216,6 +1244,90 @@ async def test_dns_resolve_query_errors_are_partial_even_without_findings(monkey
     assert execution.stop_reason == 'query-errors'
 
 
+@pytest.mark.parametrize('stop_reason', ['query-limit', 'runtime-limit'])
+@pytest.mark.asyncio
+async def test_dns_resolve_budget_stop_retains_partial_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str,
+) -> None:
+    class FakeSource:
+        def __init__(self, _word: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'api.example.com', 'pending.example.com'}
+
+    class LimitedChecker:
+        query_error_count = 0
+        query_error_types: ClassVar[set[str]] = set()
+        completed_count = 1
+
+        def __init__(self, hosts: list[str], _nameservers: list[str]) -> None:
+            assert hosts == ['api.example.com', 'pending.example.com']
+            self.stop_reason = stop_reason
+
+        async def check(self) -> tuple[list[str], list[str], list[str]]:
+            return ['api.example.com:192.0.2.10'], ['api.example.com'], ['192.0.2.10']
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(source_runner.certspottersearch, 'SearchCertspoter', FakeSource)
+    monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', LimitedChecker)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(domain='example.com', source='certspotter', dns_resolve='192.0.2.53', quiet=True),
+        return_completed_result=True,
+    )
+
+    execution = response[-1].active_evidence.executions[0]
+    assert execution.status == 'partial'
+    assert execution.stop_reason == stop_reason
+    assert [(observation.kind, observation.value) for observation in execution.observations] == [('ip', '192.0.2.10')]
+
+
+@pytest.mark.asyncio
+async def test_dns_resolve_budget_stop_retains_query_error_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSource:
+        def __init__(self, _word: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'api.example.com', 'pending.example.com'}
+
+    class LimitedChecker:
+        query_error_count = 1
+        query_error_types: ClassVar[set[str]] = {'TimeoutError'}
+        completed_count = 1
+        stop_reason = 'query-limit'
+
+        def __init__(self, hosts: list[str], _nameservers: list[str]) -> None:
+            assert hosts == ['api.example.com', 'pending.example.com']
+
+        async def check(self) -> tuple[list[str], list[str], list[str]]:
+            return ['api.example.com:192.0.2.10'], ['api.example.com'], ['192.0.2.10']
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(source_runner.certspottersearch, 'SearchCertspoter', FakeSource)
+    monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', LimitedChecker)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(domain='example.com', source='certspotter', dns_resolve='192.0.2.53', quiet=True),
+        return_completed_result=True,
+    )
+
+    execution = response[-1].active_evidence.executions[0]
+    assert execution.status == 'partial'
+    assert execution.error_type == 'TimeoutError'
+    assert execution.stop_reason == 'query-limit'
+
+
 @pytest.mark.asyncio
 async def test_requested_dns_resolve_without_inputs_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResultStore:
@@ -1266,18 +1378,24 @@ async def test_rest_dns_lookup_runs_before_return_and_retains_action_evidence(mo
             return {'192.0.2.10'}
 
     async def fake_reverse(
-        iprange: str,
+        ipranges: tuple[str, ...],
         callback,
         nameservers: list[str] | None = None,
         error_types: set[str] | None = None,
-    ) -> None:
-        assert iprange == '192.0.2.0/24'
+    ):
+        assert ipranges == ('192.0.2.0/24',)
         assert nameservers is None
         callback('PTR.example.com.')
+        return theharvester_main.dnssearch.ReverseDNSResult(254, 254)
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
     monkeypatch.setattr(source_runner.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
-    monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_all_ips_in_range', fake_reverse)
+    monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_ip_ranges', fake_reverse)
+    monkeypatch.setattr(
+        theharvester_main.dnssearch,
+        'reverse_all_ips_in_range',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('one global reverse-DNS phase is required')),
+    )
 
     response = await theharvester_main.start(
         EnumerationOptions(domain='example.com', source='securityscorecard', dns_lookup=True, quiet=True),
@@ -1322,13 +1440,57 @@ async def test_requested_dns_lookup_without_ip_ranges_is_skipped(monkeypatch: py
     assert execution.stop_reason == 'no-input'
 
 
+@pytest.mark.parametrize('stop_reason', ['query-limit', 'runtime-limit'])
 @pytest.mark.asyncio
-async def test_dns_lookup_cancels_sibling_ranges_and_persists_partial_evidence(
+async def test_dns_lookup_budget_stop_retains_partial_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str,
+) -> None:
+    class FakeSecurityScorecard:
+        def __init__(self, _domain: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return set()
+
+        async def get_ips(self) -> set[str]:
+            return {'192.0.2.10'}
+
+    async def limited_reverse(
+        ipranges: tuple[str, ...],
+        callback,
+        nameservers: list[str] | None = None,
+        error_types: set[str] | None = None,
+    ):
+        assert ipranges == ('192.0.2.0/24',)
+        callback('partial.example.com')
+        return theharvester_main.dnssearch.ReverseDNSResult(1, 1, stop_reason)
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(source_runner.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
+    monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_ip_ranges', limited_reverse)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(domain='example.com', source='securityscorecard', dns_lookup=True, quiet=True),
+        return_completed_result=True,
+    )
+
+    execution = response[-1].active_evidence.executions[0]
+    assert execution.status == 'partial'
+    assert execution.stop_reason == stop_reason
+    assert [(observation.kind, observation.value) for observation in execution.observations] == [
+        ('hostname', 'partial.example.com')
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dns_lookup_cancellation_persists_partial_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     completed: list[CompletedResult] = []
-    sibling_started = asyncio.Event()
-    sibling_cancelled = asyncio.Event()
 
     class FakeResultStore:
         async def initialize(self) -> None:
@@ -1351,26 +1513,19 @@ async def test_dns_lookup_cancels_sibling_ranges_and_persists_partial_evidence(
             return {'192.0.2.10', '198.51.100.10'}
 
     async def fake_reverse(
-        iprange: str,
+        ipranges: tuple[str, ...],
         callback,
         nameservers: list[str] | None = None,
         error_types: set[str] | None = None,
-    ) -> None:
+    ):
         assert nameservers is None
-        if iprange == '192.0.2.0/24':
-            callback('partial.example.com')
-            await sibling_started.wait()
-            raise asyncio.CancelledError
-        sibling_started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            sibling_cancelled.set()
-            raise
+        assert ipranges == ('192.0.2.0/24', '198.51.100.0/24')
+        callback('partial.example.com')
+        raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
     monkeypatch.setattr(source_runner.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
-    monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_all_ips_in_range', fake_reverse)
+    monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_ip_ranges', fake_reverse)
 
     with pytest.raises(asyncio.CancelledError):
         await theharvester_main.start(
@@ -1378,7 +1533,6 @@ async def test_dns_lookup_cancels_sibling_ranges_and_persists_partial_evidence(
             persist_completed_result=True,
         )
 
-    assert sibling_cancelled.is_set()
     assert len(completed) == 1
     execution = completed[0].active_evidence.executions[0]
     assert execution.action == 'dns-lookup'
@@ -1904,12 +2058,11 @@ async def test_source_checkpoint_excludes_other_source_work_in_progress(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_migrated_source_dns_and_checkpoint_remain_inside_each_source_job(
+async def test_source_hostnames_resolve_once_scan_wide_without_losing_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    both_dns_started = asyncio.Event()
-    first_checkpoint = asyncio.Event()
-    dns_started: list[str] = []
+    sources_finished: set[str] = set()
+    checker_inputs: list[list[str]] = []
     checkpoint_count = 0
 
     class FakeApisGuru:
@@ -1917,10 +2070,10 @@ async def test_migrated_source_dns_and_checkpoint_remain_inside_each_source_job(
             pass
 
         async def process(self, _proxy: bool) -> None:
-            return None
+            sources_finished.add('apis-guru')
 
         async def get_hostnames(self) -> set[str]:
-            return {'api.example.test'}
+            return {'api.example.test', 'shared.example.test'}
 
         async def get_emails(self) -> set[str]:
             return set()
@@ -1933,34 +2086,37 @@ async def test_migrated_source_dns_and_checkpoint_remain_inside_each_source_job(
             pass
 
         async def process(self, _proxy: bool) -> None:
-            return None
+            sources_finished.add('sourcegraph')
 
         async def get_hostnames(self) -> set[str]:
-            return {'code.example.test'}
+            return {'code.example.test', 'shared.example.test'}
 
-    class CoordinatedChecker:
-        def __init__(self, hosts: list[str], _nameservers: list[str]) -> None:
-            self.host = hosts[0]
+    class GlobalChecker:
+        query_error_count = 0
+        query_error_types: ClassVar[set[str]] = set()
+        completed_count = 3
+        stop_reason = None
+
+        def __init__(self, hosts: list[str], nameservers: list[str]) -> None:
+            assert sources_finished == {'apis-guru', 'sourcegraph'}
+            assert nameservers == ['192.0.2.53']
+            checker_inputs.append(hosts)
 
         async def check(self) -> tuple[list[str], list[str], list[str]]:
-            dns_started.append(self.host)
-            if len(dns_started) == 2:
-                both_dns_started.set()
-            await both_dns_started.wait()
-            if self.host == 'code.example.test':
-                await first_checkpoint.wait()
-            address = '192.0.2.10' if self.host == 'api.example.test' else '192.0.2.11'
-            return ([f'{self.host}:{address}'], [self.host], [address])
+            return (
+                [f'{host}:192.0.2.10' for host in checker_inputs[0]],
+                checker_inputs[0],
+                ['192.0.2.10'],
+            )
 
     async def checkpoint(_result: CompletedResult) -> None:
         nonlocal checkpoint_count
         checkpoint_count += 1
-        first_checkpoint.set()
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
     monkeypatch.setattr(source_runner.apisguru, 'SearchApisGuru', FakeApisGuru)
     monkeypatch.setattr(source_runner.sourcegraph, 'SearchSourcegraph', FakeSourcegraph)
-    monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', CoordinatedChecker)
+    monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', GlobalChecker)
 
     response = await asyncio.wait_for(
         theharvester_main.start(
@@ -1976,9 +2132,55 @@ async def test_migrated_source_dns_and_checkpoint_remain_inside_each_source_job(
         timeout=1,
     )
 
-    assert set(dns_started) == {'api.example.test', 'code.example.test'}
+    assert checker_inputs == [['api.example.test', 'code.example.test', 'shared.example.test']]
     assert checkpoint_count >= 2
-    assert {execution.source for execution in response[-1].source_executions} == {'apis-guru', 'sourcegraph'}
+    completed = response[-1]
+    assert {execution.source for execution in completed.source_executions} == {'apis-guru', 'sourcegraph'}
+    assert {
+        (observation.source, observation.kind, observation.value)
+        for observation in completed.observations
+        if observation.value == 'shared.example.test'
+    } == {
+        ('apis-guru', 'hostname', 'shared.example.test'),
+        ('sourcegraph', 'hostname', 'shared.example.test'),
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_checkpoint_failure_reports_source_and_does_not_abort_run(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint_calls = 0
+
+    class FakeCrtsh:
+        def __init__(self, _target: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'api.example.test'}
+
+    async def fail_first_checkpoint(_result: CompletedResult) -> None:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if checkpoint_calls == 1:
+            raise RuntimeError('checkpoint failed')
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(source_runner.crtsh, 'SearchCrtsh', FakeCrtsh)
+    caplog.set_level(logging.INFO, logger='theHarvester.output')
+
+    response = await theharvester_main.start(
+        EnumerationOptions(domain='example.test', source='crtsh', quiet=True),
+        completed_result_checkpoint=fail_first_checkpoint,
+        return_completed_result=True,
+    )
+
+    assert response[-1].source_executions[0].source == 'crtsh'
+    assert 'An error occurred while committing crtsh: RuntimeError: checkpoint failed' in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -2250,6 +2452,55 @@ async def test_cli_rejects_resolver_file_with_non_ip_value(monkeypatch: pytest.M
 
     with pytest.raises(ValueError, match='Invalid DNS resolver address: not-an-ip'):
         await theharvester_main.start(EnumerationOptions(domain='example.com', dns_resolve=str(resolvers), quiet=True))
+
+
+@pytest.mark.asyncio
+async def test_explicit_resolver_input_normalizing_empty_never_falls_back_to_system_dns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResultStore:
+        async def initialize(self) -> None:
+            return None
+
+        async def save_run(self, _result: CompletedResult) -> None:
+            return None
+
+    class FakeSource:
+        def __init__(self, _word: str) -> None:
+            pass
+
+        async def process(self, _proxy: bool) -> None:
+            return None
+
+        async def get_hostnames(self) -> set[str]:
+            return {'api.example.com'}
+
+    class UnexpectedChecker:
+        def __init__(self, _hosts: list[str], _nameservers: list[str]) -> None:
+            raise AssertionError('explicit empty resolver input must not fall back to system DNS')
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
+    monkeypatch.setattr(source_runner.certspottersearch, 'SearchCertspoter', FakeSource)
+    monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', UnexpectedChecker)
+    monkeypatch.setattr(theharvester_main, 'normalize_resolver_addresses', lambda _values: [])
+
+    response = await theharvester_main.start(
+        EnumerationOptions(
+            domain='example.com',
+            source='certspotter',
+            dns_resolve='invalid-resolver-input',
+            quiet=True,
+        ),
+        return_completed_result=True,
+    )
+
+    completed = response[-1]
+    assert isinstance(completed, CompletedResult)
+    assert ('hostname', 'api.example.com') in completed.results
+    execution = completed.active_evidence.executions[0]
+    assert execution.action == 'dns-resolve'
+    assert execution.status == 'skipped'
+    assert execution.stop_reason == 'no-valid-resolvers'
 
 
 @pytest.mark.asyncio
