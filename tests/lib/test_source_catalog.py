@@ -1,66 +1,30 @@
-import ast
-from pathlib import Path
-
 from theHarvester.discovery import apisguru, bevigil, builtwith, gitlabsearch, intelxsearch, rocketreach, urlscan, zoomeyesearch
-from theHarvester.lib.core import Core
 from theHarvester.lib.source_catalog import SOURCE_SPECS, ActivityClass, ResultRoute, SourceSpec, get_source_spec
 
 
-def _scheduled_source_names() -> list[str]:
-    tree = ast.parse(Path('theHarvester/__main__.py').read_text())
-    names: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Compare) or len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
-            continue
-        if not isinstance(node.left, ast.Name) or node.left.id != 'engineitem' or len(node.comparators) != 1:
-            continue
-        comparator = node.comparators[0]
-        if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
-            names.append(comparator.value)
-    return names
-
-
-def test_source_specs_cover_supported_sources() -> None:
-    scheduled = _scheduled_source_names()
-
-    assert len(scheduled) == len(set(scheduled))
-    assert set(SOURCE_SPECS) == set(scheduled)
-    assert set(SOURCE_SPECS) <= set(Core.get_supportedengines())
-
-
 def test_dead_threatcrowd_source_is_not_selectable() -> None:
-    assert 'threatcrowd' not in Core.get_supportedengines()
     assert 'threatcrowd' not in SOURCE_SPECS
-    assert 'threatcrowd' not in _scheduled_source_names()
 
 
 def test_invalid_bitbucket_domain_source_is_not_selectable() -> None:
-    assert 'bitbucket' not in Core.get_supportedengines()
     assert 'bitbucket' not in SOURCE_SPECS
-    assert 'bitbucket' not in _scheduled_source_names()
 
 
 def test_projectdiscovery_is_the_only_selector_for_the_chaos_corpus() -> None:
-    selected = Core.expand_source_selection('all')
+    selected = [spec.name for spec in SOURCE_SPECS.values() if spec.activity is ActivityClass.PASSIVE]
 
     assert 'projectdiscovery' in selected
     assert 'chaos' not in selected
-    assert 'chaos' not in Core.get_supportedengines()
-    assert 'chaos' not in _scheduled_source_names()
 
 
 def test_unsupported_duckduckgo_source_is_not_selectable() -> None:
-    assert 'duckduckgo' not in Core.get_supportedengines()
     assert 'duckduckgo' not in SOURCE_SPECS
-    assert 'duckduckgo' not in _scheduled_source_names()
 
 
 def test_removed_inert_sources_are_not_supported() -> None:
     removed = {'linkedin', 'netcraft', 'omnisint', 'sublist3r', 'zoomeyeapi'}
 
-    assert not removed & set(Core.get_supportedengines())
     assert not removed & set(SOURCE_SPECS)
-    assert not removed & set(_scheduled_source_names())
 
 
 def test_catalog_declares_hostname_resolution_policy() -> None:
@@ -146,9 +110,7 @@ def test_leakix_declares_only_its_documented_subdomain_route() -> None:
 
 
 def test_unavailable_venacus_source_is_not_selectable() -> None:
-    assert 'venacus' not in Core.get_supportedengines()
     assert 'venacus' not in SOURCE_SPECS
-    assert 'venacus' not in _scheduled_source_names()
 
 
 def test_source_lookup_preserves_case_insensitive_legacy_labels() -> None:

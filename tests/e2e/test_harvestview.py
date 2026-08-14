@@ -1177,7 +1177,6 @@ def test_harvestview_can_import_and_analyze_fixture_evidence_through_the_real_ui
                 'status': 'completed' if index < 23 else 'skipped',
                 'result_count': 1 if index < 3 else 0,
                 'duration_ms': index + 1,
-                **({'error_type': 'SourceDidNotStart'} if index >= 23 else {}),
                 **({'stop_reason': 'missing-credentials'} if index == 23 else {}),
             }
             for index, source in enumerate(ordered_sources)
@@ -1230,9 +1229,8 @@ def test_harvestview_can_import_and_analyze_fixture_evidence_through_the_real_ui
     expect(missing_credentials_row.locator('td').last).to_have_text(
         'Required credentials were not configured; add them, then retry.'
     )
-    unexpected_skip_reason = page.locator('#provider-body tr').filter(has_text=ordered_sources[24]['name']).locator('td').last
-    expect(unexpected_skip_reason).to_contain_text('Credentials required:')
-    expect(unexpected_skip_reason).to_contain_text('Source did not start')
+    untyped_skip_reason = page.locator('#provider-body tr').filter(has_text=ordered_sources[24]['name']).locator('td').last
+    expect(untyped_skip_reason).to_have_text('-')
 
     page.locator('#history-search').fill('not-present')
     expect(page.locator('#history-empty')).to_be_visible()

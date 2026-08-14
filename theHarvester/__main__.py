@@ -14,7 +14,7 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from ipaddress import ip_address, ip_network
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -34,7 +34,6 @@ from theHarvester.lib.active_evidence import ActionExecution, ActiveEvidence, Ar
 from theHarvester.lib.asn_attribution import AsnAttributionObservation
 from theHarvester.lib.cancellation import drain_tasks_after_cancellation
 from theHarvester.lib.completed_result import (
-    EXECUTION_STATUSES,
     CompletedResult,
     ExecutionStatus,
     ResultKind,
@@ -65,9 +64,9 @@ from theHarvester.lib.source_catalog import (
     SOURCE_SPECS,
     ActivityClass,
     ResultRoute,
-    SourceSpec,
     get_source_spec,
     hostname_collection_conflicts,
+    resolve_sources,
 )
 from theHarvester.lib.source_runner import SourceJob, SourceOutcome, SourceRequest, run_source_jobs
 from theHarvester.lib.virtual_host import (
@@ -402,7 +401,7 @@ async def start(
     # indicates this from the rest API
     if rest_args:
         if rest_args.source and rest_args.source == 'getsources':
-            return list(sorted(Core.get_supportedengines()))
+            return list(sorted(SOURCE_SPECS))
         args = EnumerationOptions.from_namespace(rest_args)
         filename = args.filename
         if args.dns_brute:
@@ -747,142 +746,6 @@ async def start(
             )
         )
 
-    async def collect_and_store(
-        search_engine: Any,
-        source_spec: SourceSpec,
-        source_observations: set[ResultObservation],
-    ) -> None:
-        """Process a source and persist its declared consolidated result routes.
-
-        :param search_engine: search engine to fetch details from
-        :param source_spec: canonical source identity and declared result routes
-        """
-        source = source_spec.name
-        routes = source_spec.routes
-        if source:
-            output_logger.info(f'[*] Searching {source[0].upper() + source[1:]}. ')
-        await search_engine.process(use_proxy)
-
-        def record_source_observations(source_name: str, kind: ResultKind, values: Iterable[object]) -> None:
-            source_observations.update(
-                ResultObservation(source_name, kind, value) for item in values if (value := str(item).strip())
-            )
-
-        if collect_hosts and ResultRoute.SUBDOMAINS in routes:
-            discovered_hosts = await search_engine.get_hostnames()
-            host_names = list(_normalize_hosts_for_storage(discovered_hosts, word))
-            all_hosts.extend(host_names)
-            record_source_observations(source, 'hostname', host_names)
-
-        if ResultRoute.EMAILS in routes:
-            email_list = await search_engine.get_emails()
-            all_emails.extend(email_list)
-            record_source_observations(source, 'email', email_list)
-
-        if ResultRoute.IPS in routes:
-            ips_list = await search_engine.get_ips()
-            all_ip.extend(ips_list)
-            record_source_observations(source, 'ip', _normalize_ip_addresses(ips_list))
-
-        if ResultRoute.PEOPLE in routes:
-            people_list = await search_engine.get_people()
-            all_people.extend(people_list)
-            people_evidence = (
-                json.dumps(person, ensure_ascii=False, separators=(',', ':'), sort_keys=True) for person in people_list
-            )
-            record_source_observations(source, 'person', people_evidence)
-
-        if ResultRoute.URLS in routes:
-            urls = await search_engine.get_urls()
-            all_urls.extend(urls)
-            record_source_observations(source, 'url', urls)
-
-        if ResultRoute.ASNS in routes:
-            fasns = await search_engine.get_asns()
-            total_asns.extend(fasns)
-            record_source_observations(source, 'asn', fasns)
-            get_asn_attributions = getattr(search_engine, 'get_asn_attributions', None)
-            if get_asn_attributions is not None:
-                asn_attributions.extend(
-                    attribution
-                    for attribution in await get_asn_attributions()
-                    if ResultObservation(source, 'asn', attribution.asn) in source_observations
-                    and ResultObservation(source, attribution.subject_kind, attribution.subject_value) in source_observations
-                )
-
-        if ResultRoute.BREACHES in routes:
-            breach_names = await search_engine.get_breach_names()
-            all_breaches.extend(breach_names)
-            record_source_observations(source, 'breach', breach_names)
-
-    async def run_legacy_source(search_engine: Any, source: str) -> None:
-        source_spec = get_source_spec(source)
-        source_name = source_spec.name
-        source_observations: set[ResultObservation] = set()
-        logger.info(f'Source {source_name} started')
-        started = time.perf_counter()
-        try:
-            await collect_and_store(search_engine, source_spec, source_observations)
-            reported_status = getattr(search_engine, 'execution_status', None)
-            if reported_status is None:
-                execution_status: ExecutionStatus = 'completed'
-            elif isinstance(reported_status, str) and reported_status in EXECUTION_STATUSES:
-                execution_status = cast('ExecutionStatus', reported_status)
-            else:
-                raise ValueError(f'Source {source_name} reported invalid execution status: {reported_status!r}')
-        except asyncio.CancelledError:
-            result_count = len(source_observations)
-            source_executions.append(
-                SourceExecution(
-                    source_name,
-                    'partial' if result_count else 'failed',
-                    (time.perf_counter() - started) * 1000,
-                    result_count,
-                    'CancelledError',
-                    'cancelled',
-                )
-            )
-            observations.update(source_observations)
-            raise
-        except Exception as error:
-            result_count = len(source_observations)
-            duration_ms = (time.perf_counter() - started) * 1000
-            logger.exception(f'Source {source_name} failed after {duration_ms / 1000:.2f}s with {result_count} result(s)')
-            source_executions.append(
-                SourceExecution(
-                    source_name,
-                    'partial' if result_count else 'failed',
-                    duration_ms,
-                    result_count,
-                    type(error).__name__,
-                )
-            )
-            observations.update(source_observations)
-            await checkpoint_completed_result(committed_sources_only=True)
-            raise
-        result_count = len(source_observations)
-        duration_ms = (time.perf_counter() - started) * 1000
-        stop_reason = getattr(search_engine, 'stop_reason', None)
-        source_executions.append(
-            SourceExecution(
-                source_name,
-                execution_status,
-                duration_ms,
-                result_count,
-                stop_reason=stop_reason if isinstance(stop_reason, str) else None,
-            )
-        )
-        observations.update(source_observations)
-        await checkpoint_completed_result(committed_sources_only=True)
-        stop_summary = f'; stop={stop_reason}' if isinstance(stop_reason, str) else ''
-        logger.info(
-            f'Source {source_name} finished in {duration_ms / 1000:.2f}s: '
-            f'status={execution_status}; results={result_count}{stop_summary}'
-        )
-
-    def store(search_engine: Any, source: str) -> tuple[Any, str]:
-        return search_engine, source
-
     def commit_source_outcome(outcome: SourceOutcome) -> None:
         source_executions.append(outcome.execution)
         observations.update((*outcome.observations, *outcome.credential_exposures))
@@ -987,9 +850,9 @@ async def start(
                 f'\n An error occurred while committing {outcome.execution.source}: {type(error).__name__}: {error}\n'
             )
 
-    stor_lst: list[SourceJob | tuple[Any, str]] = []
+    source_jobs: list[SourceJob] = []
     if args.source is not None:
-        engines = Core.expand_source_selection(args.source)
+        engines = resolve_sources(args.source)
         if not collect_hosts:
             hostname_only_engines = [
                 engine
@@ -1038,193 +901,9 @@ async def start(
         output_logger.info(f'[*] Activity: {", ".join(activity_labels[item] for item in ActivityClass if item in activities)}')
 
     if args.source is not None:
-        # Iterate through search engines in order
-        if set(engines).issubset(Core.get_supportedengines()):
-            output_logger.info(f'\n[*] Target: {word} \n')
-
-            for engineitem in engines:
-                if engineitem == 'apis-guru':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'arquivo':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'baidu':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'bevigil':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'brave':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'bufferoverun':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'builtwith':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'censys':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'certspotter':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'commoncrawl':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'criminalip':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'crt-name':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'crtsh':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'dehashed':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'dnsdb':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'dnsdumpster':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'dymo':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'fofa':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'fullhunt':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'github-code':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'gitlab':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'hackertarget':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'haveibeenpwned':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'hibpverified':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'hudsonrock':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'hunter':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'hunterhow':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'intelx':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'leakix':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'leaklookup':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'mojeek':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'netlas':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'onyphe':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'otx':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'pentesttools':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'projectdiscovery':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'rapiddns':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'robtex':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'rocketreach':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'securityscorecard':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'securityTrails':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'sherlockeye':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'shodan':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'shodanInternetDB':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'shodanct':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'sourcegraph':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'subdomaincenter':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'subdomainfinderc99':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'thc':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'tomba':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'urlscan':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'virustotal':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'waybackarchive':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'whoisxml':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'windvane':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'yahoo':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-                elif engineitem == 'zoomeye':
-                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
-
-        elif rest_args is not None:
-            try:
-                rest_args.dns_brute
-            except AttributeError:
-                output_logger.info('\n[!] Invalid source.\n')
-                sys.exit(1)
-        else:
-            # Print which engines aren't supported
-            unsupported_engines = set(engines) - set(Core.get_supportedengines())
-            if unsupported_engines:
-                output_logger.info(f'The following engines are not supported: {unsupported_engines}')
+        unsupported_engines = set(engines) - set(SOURCE_SPECS)
+        if unsupported_engines:
+            output_logger.info(f'The following engines are not supported: {unsupported_engines}')
             if any(engine.casefold() == 'duckduckgo' for engine in unsupported_engines):
                 output_logger.info(
                     'The duckduckgo source was removed because the DuckDuckGo Instant Answer API is not a web-search '
@@ -1232,68 +911,28 @@ async def start(
                 )
             output_logger.info('\n[!] Invalid source.\n')
             sys.exit(1)
+        output_logger.info(f'\n[*] Target: {word} \n')
+        source_jobs.extend(SourceJob(SourceRequest(engine, word, limit, start, use_proxy, collect_hosts)) for engine in engines)
 
-    async def handler(jobs: list[SourceJob | tuple[Any, str]]) -> tuple[SourceOutcome, ...]:
-        source_jobs = tuple(job for job in jobs if isinstance(job, SourceJob))
-        legacy_jobs = tuple(job for job in jobs if not isinstance(job, SourceJob))
+    async def handler(jobs: list[SourceJob]) -> tuple[SourceOutcome, ...]:
         effective_workers = min(args.source_workers, len(jobs))
         if jobs:
             output_logger.info(f'[*] Source workers: requested={args.source_workers}; effective={effective_workers}.')
-        semaphore = asyncio.Semaphore(args.source_workers)
-        runner_outcomes: tuple[SourceOutcome, ...] = ()
-        tasks: list[asyncio.Task[None]] = []
-        primary_cancellation: asyncio.CancelledError | None = None
 
-        def cancel_sibling_tasks(error: asyncio.CancelledError) -> None:
-            nonlocal primary_cancellation
-            if primary_cancellation is None:
-                primary_cancellation = error
-            current_task = asyncio.current_task()
-            for task in tasks:
-                if task is not current_task and not task.done():
-                    task.cancel()
+        def report_source_started(request: SourceRequest) -> None:
+            source = request.source
+            output_logger.info(f'[*] Searching {source[0].upper() + source[1:]}. ')
 
-        async def run_new_sources() -> None:
-            nonlocal runner_outcomes
-
-            def report_source_started(request: SourceRequest) -> None:
-                source = request.source
-                output_logger.info(f'[*] Searching {source[0].upper() + source[1:]}. ')
-
-            try:
-                runner_outcomes = await run_source_jobs(
-                    source_jobs,
-                    workers=args.source_workers,
-                    commit=commit_source_outcome,
-                    after_commit=finish_source_outcome,
-                    on_started=report_source_started,
-                )
-            except asyncio.CancelledError as error:
-                cancel_sibling_tasks(error)
-                raise
-
-        async def run_legacy_job(job: tuple[Any, str]) -> None:
-            try:
-                async with semaphore:
-                    await run_legacy_source(*job)
-            except asyncio.CancelledError as error:
-                cancel_sibling_tasks(error)
-                raise
-            except Exception as work_item_error:
-                output_logger.info(
-                    f'\n An error occurred while processing a "work item": {type(work_item_error).__name__}: {work_item_error}\n'
-                )
-
-        async with asyncio.TaskGroup() as group:
-            if source_jobs:
-                tasks.append(group.create_task(run_new_sources(), name='source-runner'))
-            tasks.extend(group.create_task(run_legacy_job(job), name=f'source:{job[1]}') for job in legacy_jobs)
-        if primary_cancellation is not None:
-            raise primary_cancellation
-        return runner_outcomes
+        return await run_source_jobs(
+            tuple(jobs),
+            workers=args.source_workers,
+            commit=commit_source_outcome,
+            after_commit=finish_source_outcome,
+            on_started=report_source_started,
+        )
 
     try:
-        await handler(stor_lst)
+        await handler(source_jobs)
         await resolve_source_hostnames()
     except asyncio.CancelledError:
         record_dns_resolution_execution(handler_cancelled=True)
@@ -1301,12 +940,6 @@ async def start(
         await persist_result(finish_completed_result(committed_sources_only=True))
         raise
 
-    recorded_sources = {result.source.casefold() for result in source_executions}
-    source_executions.extend(
-        SourceExecution(engine, 'skipped', 0, 0, 'SourceDidNotStart')
-        for engine in engines
-        if engine.casefold() not in recorded_sources
-    )
     record_dns_resolution_execution()
     await checkpoint_completed_result()
 
