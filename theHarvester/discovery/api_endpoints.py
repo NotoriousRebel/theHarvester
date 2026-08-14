@@ -667,7 +667,7 @@ class SearchApiEndpoints:
                     return None
                 try:
                     # Track request time
-                    start_time = asyncio.get_event_loop().time()
+                    start_time = asyncio.get_running_loop().time()
 
                     # Use AsyncFetcher to make the request
                     response = await AsyncFetcher.fetch(
@@ -685,7 +685,7 @@ class SearchApiEndpoints:
                     )
 
                     # Calculate response time
-                    response_time = asyncio.get_event_loop().time() - start_time
+                    response_time = asyncio.get_running_loop().time() - start_time
 
                     if response is None:
                         self.request_error_count += 1
