@@ -203,6 +203,7 @@ class Core:
         'tomba': ('key', 'secret'),
         'virustotal': ('key',),
         'whoisxml': ('key',),
+        'windvane': ('key',),
         'zoomeye': ('key',),
     }
 
@@ -383,6 +384,10 @@ class Core:
     @staticmethod
     def whoisxml_key() -> str:
         return Core._api_key_value('whoisxml')
+
+    @staticmethod
+    def windvane_key() -> str:
+        return Core._api_key_value('windvane')
 
     @staticmethod
     def zoomeye_key() -> str:
