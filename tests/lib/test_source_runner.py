@@ -173,6 +173,7 @@ async def test_source_jobs_require_a_positive_worker_count(workers: object) -> N
             {},
         ),
         ('whoisxml', 'theHarvester.lib.source_runner.whoisxml.SearchWhoisXML', ('example.test',), {}),
+        ('windvane', 'theHarvester.lib.source_runner.windvane.SearchWindvane', ('example.test',), {}),
         ('yahoo', 'theHarvester.lib.source_runner.yahoosearch.SearchYahoo', ('example.test', 25), {}),
         ('zoomeye', 'theHarvester.lib.source_runner.zoomeyesearch.SearchZoomEye', ('example.test', 25), {}),
     ],
