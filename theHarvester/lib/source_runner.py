@@ -64,7 +64,6 @@ from theHarvester.discovery import (
     virustotal,
     waybackarchive,
     whoisxml,
-    windvane,
     yahoosearch,
     zoomeyesearch,
 )
@@ -170,7 +169,6 @@ SOURCE_FACTORIES: dict[str, SourceFactory] = {
     'virustotal': lambda request: virustotal.SearchVirustotal(request.target),
     'waybackarchive': lambda request: waybackarchive.SearchWaybackarchive(request.target, request.limit),
     'whoisxml': lambda request: whoisxml.SearchWhoisXML(request.target),
-    'windvane': lambda request: windvane.SearchWindvane(request.target),
     'yahoo': lambda request: yahoosearch.SearchYahoo(request.target, request.limit),
     'zoomeye': lambda request: zoomeyesearch.SearchZoomEye(request.target, request.limit),
 }

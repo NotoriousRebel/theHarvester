@@ -158,6 +158,22 @@ async def test_removed_duckduckgo_source_explains_the_migration(
     assert 'DuckDuckGo Instant Answer API is not a web-search endpoint' in capsys.readouterr().out
 
 
+@pytest.mark.asyncio
+async def test_removed_windvane_source_explains_the_explicit_dns_migration(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+    monkeypatch.setattr(sys, 'argv', ['theHarvester', '-d', 'example.com', '-b', 'windvane'])
+
+    with pytest.raises(SystemExit) as exit_info:
+        await theharvester_main.start()
+
+    assert exit_info.value.code == 1
+    output = capsys.readouterr().out
+    assert 'implicit DNS name guessing' in output
+    assert 'explicit -c/--dns-brute action' in output
+
+
 def _confirmed_vhost(endpoint: str = 'http://192.0.2.10:80/') -> VirtualHostObservation:
     return VirtualHostObservation(
         endpoint=endpoint,
@@ -2354,7 +2370,6 @@ async def test_limited_source_orchestration_uses_immutable_runner_request(
         ('urlscan', 'urlscan', 'SearchUrlscan'),
         ('virustotal', 'virustotal', 'SearchVirustotal'),
         ('whoisxml', 'whoisxml', 'SearchWhoisXML'),
-        ('windvane', 'windvane', 'SearchWindvane'),
     ],
 )
 @pytest.mark.asyncio

@@ -61,6 +61,7 @@ from theHarvester.lib.resolver_selection import DEFAULT_DNS_RESOLVERS, normalize
 from theHarvester.lib.result_values import normalize_asn
 from theHarvester.lib.routeviews import RouteViewsCancelled, RouteViewsResult, enrich_routeviews
 from theHarvester.lib.source_catalog import (
+    RETIRED_SOURCE_MESSAGES,
     SOURCE_SPECS,
     ActivityClass,
     ResultRoute,
@@ -909,6 +910,9 @@ async def start(
                     'The duckduckgo source was removed because the DuckDuckGo Instant Answer API is not a web-search '
                     'endpoint; choose a source listed by --help.'
                 )
+            for engine in sorted(unsupported_engines, key=str.casefold):
+                if message := RETIRED_SOURCE_MESSAGES.get(engine.casefold()):
+                    output_logger.info(message)
             output_logger.info('\n[!] Invalid source.\n')
             sys.exit(1)
         output_logger.info(f'\n[*] Target: {word} \n')
