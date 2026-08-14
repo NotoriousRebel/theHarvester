@@ -77,6 +77,7 @@ from theHarvester.lib.completed_result import (
     ResultObservation,
     SourceExecution,
 )
+from theHarvester.lib.enumeration import DEFAULT_SOURCE_WORKERS
 from theHarvester.lib.hostnames import normalize_scoped_hostname
 from theHarvester.lib.source_catalog import ResultRoute, get_source_spec
 
@@ -86,7 +87,6 @@ SourceFactory = Callable[['SourceRequest'], Any]
 SourceStarted = Callable[['SourceRequest'], None]
 OutcomeCommit = Callable[['SourceOutcome'], None]
 OutcomeAfterCommit = Callable[['SourceOutcome'], Awaitable[None]]
-SOURCE_WORKERS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,49 +368,76 @@ async def run_source(
 async def run_source_jobs(
     jobs: tuple[SourceJob, ...],
     *,
+    workers: int = DEFAULT_SOURCE_WORKERS,
     commit: OutcomeCommit | None = None,
     after_commit: OutcomeAfterCommit | None = None,
-    semaphore: asyncio.Semaphore | None = None,
     on_started: SourceStarted | None = None,
 ) -> tuple[SourceOutcome, ...]:
-    active_sources = semaphore or asyncio.Semaphore(SOURCE_WORKERS)
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0:
+        raise ValueError('source workers must be a positive integer')
     outcomes: list[SourceOutcome | None] = [None] * len(jobs)
     owned_tasks: list[asyncio.Task[None]] = []
     primary_cancellation: asyncio.CancelledError | None = None
+    next_index = 0
 
-    async def run(index: int, job: SourceJob) -> None:
-        nonlocal primary_cancellation
+    def commit_cancelled(index: int, outcome: SourceOutcome) -> None:
+        outcomes[index] = outcome
+        if commit is not None:
+            commit(outcome)
 
-        def commit_cancelled(outcome: SourceOutcome) -> None:
-            outcomes[index] = outcome
-            if commit is not None:
-                commit(outcome)
+    async def worker() -> None:
+        nonlocal next_index, primary_cancellation
 
-        try:
-            async with active_sources:
-                outcome = await run_source(job.request, commit_cancelled=commit_cancelled, on_started=on_started)
+        while next_index < len(jobs):
+            index = next_index
+            next_index += 1
+            job = jobs[index]
+
+            def commit_current_cancelled(outcome: SourceOutcome, current_index: int = index) -> None:
+                commit_cancelled(current_index, outcome)
+
+            try:
+                outcome = await run_source(
+                    job.request,
+                    commit_cancelled=commit_current_cancelled,
+                    on_started=on_started,
+                )
                 outcomes[index] = outcome
                 if commit is not None:
                     commit(outcome)
                 if after_commit is not None:
                     await after_commit(outcome)
-        except asyncio.CancelledError as error:
-            if primary_cancellation is None:
-                primary_cancellation = error
-            if outcomes[index] is None:
+            except asyncio.CancelledError as error:
+                if primary_cancellation is None:
+                    primary_cancellation = error
+                if outcomes[index] is None:
+                    commit_cancelled(
+                        index,
+                        SourceOutcome(SourceExecution(job.request.source, 'failed', 0, 0, 'CancelledError', 'cancelled')),
+                    )
+                current_task = asyncio.current_task()
+                for task in owned_tasks:
+                    if task is not current_task and not task.done():
+                        task.cancel()
+                raise
+
+    caught_cancellation: asyncio.CancelledError | None = None
+    try:
+        async with asyncio.TaskGroup() as group:
+            for index in range(min(workers, len(jobs))):
+                owned_tasks.append(group.create_task(worker(), name=f'source-worker:{index}'))
+    except asyncio.CancelledError as error:
+        caught_cancellation = primary_cancellation or error
+
+    if primary_cancellation is not None or caught_cancellation is not None:
+        cancellation = primary_cancellation or caught_cancellation
+        for index, outcome in enumerate(outcomes):
+            if outcome is None:
+                request = jobs[index].request
                 commit_cancelled(
-                    SourceOutcome(SourceExecution(job.request.source, 'failed', 0, 0, 'CancelledError', 'cancelled'))
+                    index,
+                    SourceOutcome(SourceExecution(request.source, 'failed', 0, 0, 'CancelledError', 'cancelled')),
                 )
-            current_task = asyncio.current_task()
-            for task in owned_tasks:
-                if task is not current_task and not task.done():
-                    task.cancel()
-            raise
-
-    async with asyncio.TaskGroup() as group:
-        for index, job in enumerate(jobs):
-            owned_tasks.append(group.create_task(run(index, job), name=f'source:{job.request.source}'))
-
-    if primary_cancellation is not None:
-        raise primary_cancellation
+        assert cancellation is not None
+        raise cancellation
     return tuple(outcome for outcome in outcomes if outcome is not None)

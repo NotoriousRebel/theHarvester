@@ -13,6 +13,7 @@ from theHarvester.lib.asn_attribution import AsnAttributionObservation
 from theHarvester.lib.completed_result import ResultObservation, SourceExecution
 from theHarvester.lib.source_catalog import SOURCE_SPECS
 from theHarvester.lib.source_runner import (
+    DEFAULT_SOURCE_WORKERS,
     SOURCE_FACTORIES,
     SourceJob,
     SourceOutcome,
@@ -39,6 +40,15 @@ def test_source_contracts_are_immutable() -> None:
 
 def test_source_factories_match_the_catalog() -> None:
     assert set(SOURCE_FACTORIES) == set(SOURCE_SPECS)
+
+
+@pytest.mark.parametrize('workers', [0, -1, True, 1.5])
+@pytest.mark.asyncio
+async def test_source_jobs_require_a_positive_worker_count(workers: object) -> None:
+    with pytest.raises(ValueError, match='source workers must be a positive integer'):
+        await run_source_jobs((), workers=workers)  # type: ignore[arg-type]
+
+    assert DEFAULT_SOURCE_WORKERS > 0
 
 
 @pytest.mark.parametrize(
@@ -590,7 +600,7 @@ async def test_runner_keeps_only_asn_attributions_backed_by_accepted_observation
 
 
 @pytest.mark.asyncio
-async def test_source_jobs_use_named_tasks_bounded_to_three_and_isolate_failures(
+async def test_source_jobs_use_a_clamped_worker_pool_and_isolate_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     active = 0
@@ -625,15 +635,46 @@ async def test_source_jobs_use_named_tasks_bounded_to_three_and_isolate_failures
         monkeypatch.setitem(SOURCE_FACTORIES, source, lambda _request, source=source: GatedAdapter(source))
     jobs = tuple(SourceJob(SourceRequest(source, 'example.test', 25, 0, False, True)) for source in source_names)
 
-    outcomes = await run_source_jobs(jobs)
+    outcomes = await run_source_jobs(jobs, workers=3)
 
     assert peak == 3
-    assert task_names == {f'source:{source}' for source in source_names}
+    assert task_names == {'source-worker:0', 'source-worker:1', 'source-worker:2'}
     assert [outcome.execution.source for outcome in outcomes] == list(source_names)
     assert outcomes[0].execution.status == 'partial'
     assert outcomes[0].execution.error_type == 'RuntimeError'
     assert all(outcome.execution.status == 'completed' for outcome in outcomes[1:])
     assert not [task for task in asyncio.all_tasks() if task.get_name().startswith('source:') and not task.done()]
+
+
+@pytest.mark.parametrize('workers', [1, 3, 8])
+@pytest.mark.asyncio
+async def test_source_worker_count_does_not_change_completed_sources_or_results(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int,
+) -> None:
+    starts: list[str] = []
+
+    class CompleteAdapter:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        async def process(self, _proxy: bool) -> None:
+            starts.append(self.source)
+            await asyncio.sleep(0)
+
+        async def get_hostnames(self) -> set[str]:
+            return {f'{self.source}.example.test'}
+
+    source_names = ('apis-guru', 'sourcegraph', 'crtsh', 'crt-name')
+    for source in source_names:
+        monkeypatch.setitem(SOURCE_FACTORIES, source, lambda _request, source=source: CompleteAdapter(source))
+    jobs = tuple(SourceJob(SourceRequest(source, 'example.test', 25, 0, False, True)) for source in source_names)
+
+    outcomes = await run_source_jobs(jobs, workers=workers)
+
+    assert sorted(starts) == sorted(source_names)
+    assert [outcome.execution.source for outcome in outcomes] == list(source_names)
+    assert [outcome.execution.result_count for outcome in outcomes] == [1, 1, 1, 1]
 
 
 @pytest.mark.asyncio

@@ -66,6 +66,7 @@ run_id="$(curl -s http://127.0.0.1:5000/api/v1/runs \
       "target": "example.com",
       "sources": ["emails", "crtsh"],
       "limit": 500,
+      "source_workers": 6,
       "deadline_seconds": 1800
     }' \
   | jq -r '.run_id')"
@@ -76,6 +77,10 @@ curl -s "http://127.0.0.1:5000/api/v1/runs/$run_id" \
 ```
 
 Run submission is asynchronous. Lifecycle status is `queued`, `running`, `cancelling`, `cancelled`, `completed`, or `failed`. Terminal evidence status is reported separately as `complete`, `partial`, or `failed` when evidence exists.
+
+`source_workers` is the same positive discovery-source concurrency used by CLI `-j` / `--source-workers` and
+HarvestView's advanced control. It defaults to six and is clamped to the selected source count. It does not skip sources,
+truncate their results, or change the concurrency and budgets of DNS or later actions.
 
 P1 DNS and P2 direct options are fields on the same run request. The OpenAPI schema shows their current defaults, limits, and descriptions. The server uses the operator-selected target and does not impose a public-only egress policy.
 

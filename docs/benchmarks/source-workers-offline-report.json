@@ -1,0 +1,136 @@
+{
+  "cohort": "docs/benchmarks/source-workers-offline-cohort.jsonl",
+  "cohort_source_executions": 20,
+  "duration_prescreen": {
+    "metrics": [
+      {
+        "effective_workers": 5,
+        "estimated_makespan_ms": 59500.0,
+        "estimated_results_per_minute": 530.42,
+        "workers": 5
+      },
+      {
+        "effective_workers": 6,
+        "estimated_makespan_ms": 56100.0,
+        "estimated_results_per_minute": 562.567,
+        "workers": 6
+      },
+      {
+        "effective_workers": 7,
+        "estimated_makespan_ms": 50000.0,
+        "estimated_results_per_minute": 631.2,
+        "workers": 7
+      },
+      {
+        "effective_workers": 8,
+        "estimated_makespan_ms": 47900.0,
+        "estimated_results_per_minute": 658.873,
+        "workers": 8
+      }
+    ],
+    "mode": "duration-only-pre-screen",
+    "selected_workers": null,
+    "selection_eligible": false
+  },
+  "limitations": [
+    "Scripted offline timings are not a provider guarantee.",
+    "Duration-only results are a pre-screen and cannot select the shipping default.",
+    "Scripted profiles open no sockets, so peak sockets are not observable."
+  ],
+  "repeats": 9,
+  "scale": 0.05,
+  "scripted_end_to_end": [
+    {
+      "cancellation_latency_ms": 0.966,
+      "cohort_sources": 20,
+      "completed_sources": 20,
+      "dns_failures": 0,
+      "effective_workers": 5,
+      "http_429": 0,
+      "http_503": 0,
+      "latency_ms_p50": 420.849,
+      "latency_ms_p95": 1245.42,
+      "peak_active_tasks": 5,
+      "peak_memory_bytes": 254261,
+      "peak_sockets": null,
+      "results_per_minute": 12846.596,
+      "retained_results": 526,
+      "run_ms_p50": 2456.682,
+      "run_ms_p95": 3054.999,
+      "runner": "run_source_jobs",
+      "timeouts": 0,
+      "workers": 5
+    },
+    {
+      "cancellation_latency_ms": 0.831,
+      "cohort_sources": 20,
+      "completed_sources": 20,
+      "dns_failures": 0,
+      "effective_workers": 6,
+      "http_429": 0,
+      "http_503": 0,
+      "latency_ms_p50": 420.855,
+      "latency_ms_p95": 1247.273,
+      "peak_active_tasks": 6,
+      "peak_memory_bytes": 236218,
+      "peak_sockets": null,
+      "results_per_minute": 14163.009,
+      "retained_results": 526,
+      "run_ms_p50": 2228.34,
+      "run_ms_p95": 2806.666,
+      "runner": "run_source_jobs",
+      "timeouts": 0,
+      "workers": 6
+    },
+    {
+      "cancellation_latency_ms": 0.657,
+      "cohort_sources": 20,
+      "completed_sources": 6,
+      "dns_failures": 5,
+      "effective_workers": 7,
+      "http_429": 5,
+      "http_503": 5,
+      "latency_ms_p50": 421.03,
+      "latency_ms_p95": 1244.271,
+      "peak_active_tasks": 7,
+      "peak_memory_bytes": 169104,
+      "peak_sockets": null,
+      "results_per_minute": 4496.748,
+      "retained_results": 81,
+      "run_ms_p50": 2067.289,
+      "run_ms_p95": 2535.166,
+      "runner": "run_source_jobs",
+      "timeouts": 4,
+      "workers": 7
+    },
+    {
+      "cancellation_latency_ms": 1.098,
+      "cohort_sources": 20,
+      "completed_sources": 6,
+      "dns_failures": 5,
+      "effective_workers": 8,
+      "http_429": 5,
+      "http_503": 5,
+      "latency_ms_p50": 419.499,
+      "latency_ms_p95": 1244.344,
+      "peak_active_tasks": 8,
+      "peak_memory_bytes": 180443,
+      "peak_sockets": null,
+      "results_per_minute": 4698.647,
+      "retained_results": 81,
+      "run_ms_p50": 2016.899,
+      "run_ms_p95": 2426.23,
+      "runner": "run_source_jobs",
+      "timeouts": 4,
+      "workers": 8
+    }
+  ],
+  "seed": 289,
+  "selected_workers": 6,
+  "selection_eligible": true,
+  "selection_thresholds": {
+    "cancellation_latency_ratio": 2.0,
+    "near_plateau_ratio": 0.95,
+    "resource_pressure_ratio": 1.5
+  }
+}

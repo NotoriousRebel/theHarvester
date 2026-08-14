@@ -23,6 +23,7 @@ def test_harvestview_owns_root_and_issues_an_http_only_session(tmp_path, monkeyp
     assert '<summary>Advanced safety controls</summary>' in root.text
     assert f'value="{",".join(DEFAULT_DNS_RESOLVERS)}"' in root.text
     assert 'Resolve with the configured resolver addresses.' in root.text
+    assert 'id="source-workers" name="source_workers" type="number" min="1"' in root.text
     assert legacy.status_code == 404
     cookie = root.headers['set-cookie']
     assert 'theharvester-api-key=' in cookie
@@ -47,6 +48,7 @@ def test_harvestview_assets_load_outside_the_repository_directory(tmp_path, monk
 
     assert response.status_code == 200
     assert 'function renderResults' in response.text
+    assert "source_workers: Number(form.get('source_workers'))" in response.text
 
 
 def test_harvestview_offers_jsonl_and_sqlite_imports_with_jsonl_export(tmp_path, monkeypatch) -> None:

@@ -48,6 +48,7 @@ from theHarvester.lib.enumeration import (
     DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS,
     DEFAULT_RESULT_LIMIT,
     DEFAULT_RESULT_START,
+    DEFAULT_SOURCE_WORKERS,
     EnumerationOptions,
 )
 from theHarvester.lib.hostnames import normalize_scoped_hostname
@@ -68,7 +69,7 @@ from theHarvester.lib.source_catalog import (
     get_source_spec,
     hostname_collection_conflicts,
 )
-from theHarvester.lib.source_runner import SOURCE_WORKERS, SourceJob, SourceOutcome, SourceRequest, run_source_jobs
+from theHarvester.lib.source_runner import SourceJob, SourceOutcome, SourceRequest, run_source_jobs
 from theHarvester.lib.virtual_host import (
     DEFAULT_VHOST_CONCURRENCY,
     DEFAULT_VHOST_REQUEST_LIMIT,
@@ -173,6 +174,13 @@ async def start(
         '--start',
         help='Result offset for sources that support pagination (default: 0).',
         default=DEFAULT_RESULT_START,
+        type=int,
+    )
+    parser.add_argument(
+        '-j',
+        '--source-workers',
+        help='Maximum discovery sources run concurrently (default: %(default)s).',
+        default=DEFAULT_SOURCE_WORKERS,
         type=int,
     )
     parser.add_argument(
@@ -411,6 +419,8 @@ async def start(
         configure_logging(verbose=args.verbose)
         if args.verbose:
             logger.info('Verbose logging enabled')
+    if isinstance(args.source_workers, bool) or not isinstance(args.source_workers, int) or args.source_workers <= 0:
+        raise ValueError('--source-workers must be a positive integer')
     collect_hosts = not args.no_hosts
     action_request = {
         'no_hosts': args.no_hosts,
@@ -1226,7 +1236,10 @@ async def start(
     async def handler(jobs: list[SourceJob | tuple[Any, str]]) -> tuple[SourceOutcome, ...]:
         source_jobs = tuple(job for job in jobs if isinstance(job, SourceJob))
         legacy_jobs = tuple(job for job in jobs if not isinstance(job, SourceJob))
-        semaphore = asyncio.Semaphore(SOURCE_WORKERS)
+        effective_workers = min(args.source_workers, len(jobs))
+        if jobs:
+            output_logger.info(f'[*] Source workers: requested={args.source_workers}; effective={effective_workers}.')
+        semaphore = asyncio.Semaphore(args.source_workers)
         runner_outcomes: tuple[SourceOutcome, ...] = ()
         tasks: list[asyncio.Task[None]] = []
         primary_cancellation: asyncio.CancelledError | None = None
@@ -1250,9 +1263,9 @@ async def start(
             try:
                 runner_outcomes = await run_source_jobs(
                     source_jobs,
+                    workers=args.source_workers,
                     commit=commit_source_outcome,
                     after_commit=finish_source_outcome,
-                    semaphore=semaphore,
                     on_started=report_source_started,
                 )
             except asyncio.CancelledError as error:

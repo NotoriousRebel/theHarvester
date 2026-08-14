@@ -1903,6 +1903,43 @@ def test_no_hosts_child_preserves_the_run_request(tmp_path, monkeypatch) -> None
     assert received_options[0].no_hosts is True
 
 
+@pytest.mark.parametrize('source_workers', [0, -1, True, 1.5])
+def test_run_request_requires_positive_source_workers(source_workers: object) -> None:
+    from pydantic import ValidationError
+
+    from theHarvester.lib.api.run_models import RunRequest
+
+    with pytest.raises(ValidationError):
+        RunRequest(target='example.test', sources=['crtsh'], source_workers=source_workers)
+
+
+def test_source_workers_are_preserved_from_rest_request_to_child(tmp_path, monkeypatch) -> None:
+    from theHarvester import __main__ as main_module
+    from theHarvester.lib.api import run_worker
+    from theHarvester.lib.api.run_models import RunRequest
+    from theHarvester.lib.api.run_store import RunStore
+    from theHarvester.lib.completed_result import CompletedResult
+
+    received_options = []
+
+    async def fake_start(options, **_kwargs):
+        received_options.append(options)
+        now = datetime.now(UTC)
+        return (CompletedResult.finish(target=options.domain, started_at=now, completed_at=now, groups={}),)
+
+    monkeypatch.setattr(main_module, 'start', fake_start)
+
+    async def scenario() -> None:
+        store = RunStore(tmp_path / 'runs.sqlite')
+        created = await store.create(RunRequest(target='example.test', sources=['crtsh'], source_workers=7))
+        assert await store.claim_next() is not None
+        await run_worker._child_execute(created['run_id'], store.database)
+
+    asyncio.run(scenario())
+
+    assert received_options[0].source_workers == 7
+
+
 def test_virtual_host_request_normalizes_a_self_contained_target_action() -> None:
     from pydantic import ValidationError
 

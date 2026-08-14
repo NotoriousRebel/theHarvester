@@ -172,6 +172,7 @@ def test_harvestview_can_submit_overridable_execution_controls(
     page.locator('#run-target').fill('example.com')
     page.get_by_text('Advanced execution controls', exact=True).click()
     page.locator('#run-start').fill('25')
+    page.locator('#source-workers').fill('7')
     page.locator('#run-deadline').fill('86400')
     page.locator('[name="proxies"]').check()
     page.locator('[name="shodan"]').check()
@@ -198,6 +199,7 @@ def test_harvestview_can_submit_overridable_execution_controls(
         'sources': ['crtsh'],
         'limit': 500,
         'start': 25,
+        'source_workers': 7,
         'deadline_seconds': 86_400,
         'proxies': True,
         'no_hosts': False,

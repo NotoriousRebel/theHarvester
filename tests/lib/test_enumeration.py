@@ -1,4 +1,5 @@
 from argparse import Namespace
+from dataclasses import asdict
 
 import pytest
 
@@ -6,6 +7,7 @@ from theHarvester.lib.enumeration import (
     DEFAULT_DNS_RECURSIVE_QUERY_LIMIT,
     DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS,
     DEFAULT_RESULT_LIMIT,
+    DEFAULT_SOURCE_WORKERS,
     EnumerationOptions,
 )
 from theHarvester.lib.source_catalog import selected_action_names
@@ -19,6 +21,7 @@ def test_enumeration_options_fill_the_shared_execution_defaults() -> None:
     assert options.start == 0
     assert options.dns_recursive_query_limit == DEFAULT_DNS_RECURSIVE_QUERY_LIMIT == 3_000
     assert options.dns_recursive_runtime_seconds == DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS == 60.0
+    assert options.source_workers == DEFAULT_SOURCE_WORKERS
 
 
 def test_enumeration_options_preserve_explicit_transport_values() -> None:
@@ -31,6 +34,7 @@ def test_enumeration_options_preserve_explicit_transport_values() -> None:
             proxies=True,
             quiet=True,
             screenshot='/tmp/managed-screenshots',
+            source_workers=7,
         )
     )
 
@@ -39,6 +43,16 @@ def test_enumeration_options_preserve_explicit_transport_values() -> None:
     assert options.proxies is True
     assert options.quiet is True
     assert options.screenshot == '/tmp/managed-screenshots'
+    assert options.source_workers == 7
+
+
+def test_source_workers_do_not_change_provider_or_action_controls() -> None:
+    baseline = asdict(EnumerationOptions(domain='example.com', source='crtsh'))
+    configured = asdict(EnumerationOptions(domain='example.com', source='crtsh', source_workers=8))
+
+    assert configured.pop('source_workers') == 8
+    baseline.pop('source_workers')
+    assert configured == baseline
 
 
 def test_routeviews_is_an_explicit_passive_action_independent_of_source_limits() -> None:

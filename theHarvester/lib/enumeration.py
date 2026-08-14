@@ -13,6 +13,7 @@ from theHarvester.lib.virtual_host import (
 
 DEFAULT_RESULT_LIMIT = 500
 DEFAULT_RESULT_START = 0
+DEFAULT_SOURCE_WORKERS = 6
 DEFAULT_DNS_RECURSIVE_QUERY_LIMIT = DEFAULT_RECURSIVE_DNS_QUERY_LIMIT
 DEFAULT_DNS_RECURSIVE_RUNTIME_SECONDS = 60.0
 
@@ -25,6 +26,7 @@ class EnumerationOptions:
     source: str | None = None
     limit: int = DEFAULT_RESULT_LIMIT
     start: int = DEFAULT_RESULT_START
+    source_workers: int = DEFAULT_SOURCE_WORKERS
     proxies: bool = False
     routeviews: bool = False
     no_hosts: bool = False
@@ -61,6 +63,7 @@ class EnumerationOptions:
             source=getattr(value, 'source', None),
             limit=getattr(value, 'limit', DEFAULT_RESULT_LIMIT),
             start=getattr(value, 'start', DEFAULT_RESULT_START),
+            source_workers=getattr(value, 'source_workers', DEFAULT_SOURCE_WORKERS),
             proxies=getattr(value, 'proxies', False),
             routeviews=getattr(value, 'routeviews', False),
             no_hosts=getattr(value, 'no_hosts', False),
