@@ -215,7 +215,7 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', UnexpectedChecker)
     monkeypatch.setattr(source_runner.search_dehashed, 'SearchDehashed', FakeDehashed)
     monkeypatch.setattr(theharvester_main.api_endpoints, 'SearchApiEndpoints', FakeApiEndpoints)
-    monkeypatch.setattr(theharvester_main.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
+    monkeypatch.setattr(source_runner.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
     monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_all_ips_in_range', fake_reverse_all_ips_in_range)
     monkeypatch.setattr(
         sys,

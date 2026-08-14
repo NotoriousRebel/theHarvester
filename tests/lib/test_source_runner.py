@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from typing import Any
@@ -43,30 +44,126 @@ def test_source_factories_match_the_catalog() -> None:
 @pytest.mark.parametrize(
     ('source', 'patch_target', 'expected_args', 'expected_kwargs'),
     [
-        ('crtsh', 'theHarvester.lib.source_runner.crtsh.SearchCrtsh', ('example.test',), {}),
         ('apis-guru', 'theHarvester.lib.source_runner.apisguru.SearchApisGuru', ('example.test', 25), {}),
         ('arquivo', 'theHarvester.lib.source_runner.arquivo.SearchArquivo', ('example.test', 25), {}),
         ('baidu', 'theHarvester.lib.source_runner.baidusearch.SearchBaidu', ('example.test', 25), {}),
+        ('bevigil', 'theHarvester.lib.source_runner.bevigil.SearchBeVigil', ('example.test',), {}),
         ('brave', 'theHarvester.lib.source_runner.bravesearch.SearchBrave', ('example.test', 25), {}),
+        ('bufferoverun', 'theHarvester.lib.source_runner.bufferoverun.SearchBufferover', ('example.test',), {}),
         ('builtwith', 'theHarvester.lib.source_runner.builtwith.SearchBuiltWith', ('example.test',), {}),
         ('censys', 'theHarvester.lib.source_runner.censysearch.SearchCensys', ('example.test', 25), {}),
+        ('certspotter', 'theHarvester.lib.source_runner.certspottersearch.SearchCertspoter', ('example.test',), {}),
         ('commoncrawl', 'theHarvester.lib.source_runner.commoncrawl.SearchCommoncrawl', ('example.test', 25), {}),
+        ('criminalip', 'theHarvester.lib.source_runner.criminalip.SearchCriminalIP', ('example.test',), {}),
+        ('crt-name', 'theHarvester.lib.source_runner.crtname.SearchCrtName', ('example.test',), {}),
+        ('crtsh', 'theHarvester.lib.source_runner.crtsh.SearchCrtsh', ('example.test',), {}),
         ('dehashed', 'theHarvester.lib.source_runner.search_dehashed.SearchDehashed', ('example.test',), {'limit': 25}),
+        ('dnsdb', 'theHarvester.lib.source_runner.dnsdb.SearchDNSDB', ('example.test',), {}),
+        (
+            'dnsdumpster',
+            'theHarvester.lib.source_runner.search_dnsdumpster.SearchDNSDumpster',
+            ('example.test',),
+            {},
+        ),
+        ('dymo', 'theHarvester.lib.source_runner.dymosearch.SearchDymo', ('example.test',), {}),
+        ('fofa', 'theHarvester.lib.source_runner.fofa.SearchFofa', ('example.test',), {}),
+        ('fullhunt', 'theHarvester.lib.source_runner.fullhuntsearch.SearchFullHunt', ('example.test',), {}),
         ('github-code', 'theHarvester.lib.source_runner.githubcode.SearchGithubCode', ('example.test', 25), {}),
+        ('gitlab', 'theHarvester.lib.source_runner.gitlabsearch.SearchGitlab', ('example.test',), {}),
+        (
+            'hackertarget',
+            'theHarvester.lib.source_runner.hackertarget.SearchHackerTarget',
+            ('example.test',),
+            {},
+        ),
+        (
+            'haveibeenpwned',
+            'theHarvester.lib.source_runner.haveibeenpwned.SearchHaveIBeenPwned',
+            ('example.test',),
+            {},
+        ),
+        (
+            'hibpverified',
+            'theHarvester.lib.source_runner.hibpverified.SearchHibpVerified',
+            ('example.test',),
+            {},
+        ),
         ('hudsonrock', 'theHarvester.lib.source_runner.hudsonrocksearch.SearchHudsonRock', ('example.test',), {}),
         ('hunter', 'theHarvester.lib.source_runner.huntersearch.SearchHunter', ('example.test', 25, 5), {}),
+        ('hunterhow', 'theHarvester.lib.source_runner.searchhunterhow.SearchHunterHow', ('example.test',), {}),
+        ('intelx', 'theHarvester.lib.source_runner.intelxsearch.SearchIntelx', ('example.test',), {}),
+        ('leakix', 'theHarvester.lib.source_runner.leakix.SearchLeakix', ('example.test',), {}),
+        ('leaklookup', 'theHarvester.lib.source_runner.leaklookup.SearchLeakLookup', ('example.test',), {}),
         ('mojeek', 'theHarvester.lib.source_runner.mojeek.SearchMojeek', ('example.test', 25), {}),
         ('netlas', 'theHarvester.lib.source_runner.netlas.SearchNetlas', ('example.test', 25), {}),
+        ('onyphe', 'theHarvester.lib.source_runner.onyphe.SearchOnyphe', ('example.test',), {}),
+        ('otx', 'theHarvester.lib.source_runner.otxsearch.SearchOtx', ('example.test',), {}),
+        (
+            'pentesttools',
+            'theHarvester.lib.source_runner.pentesttools.SearchPentestTools',
+            ('example.test',),
+            {},
+        ),
+        (
+            'projectdiscovery',
+            'theHarvester.lib.source_runner.projectdiscovery.SearchDiscovery',
+            ('example.test',),
+            {},
+        ),
+        ('rapiddns', 'theHarvester.lib.source_runner.rapiddns.SearchRapidDns', ('example.test',), {}),
+        ('robtex', 'theHarvester.lib.source_runner.robtex.SearchRobtex', ('example.test',), {}),
         ('rocketreach', 'theHarvester.lib.source_runner.rocketreach.SearchRocketReach', ('example.test', 25), {}),
+        (
+            'securityTrails',
+            'theHarvester.lib.source_runner.securitytrailssearch.SearchSecuritytrail',
+            ('example.test',),
+            {},
+        ),
+        (
+            'securityscorecard',
+            'theHarvester.lib.source_runner.securityscorecard.SearchSecurityScorecard',
+            ('example.test',),
+            {},
+        ),
+        (
+            'sherlockeye',
+            'theHarvester.lib.source_runner.sherlockeye.SearchSherlockeye',
+            ('example.test',),
+            {},
+        ),
         ('shodan', 'theHarvester.lib.source_runner.shodansearch.SearchShodan', ('example.test',), {}),
+        (
+            'shodanInternetDB',
+            'theHarvester.lib.source_runner.shodan_internetdb.SearchShodanInternetDB',
+            ('example.test',),
+            {},
+        ),
+        ('shodanct', 'theHarvester.lib.source_runner.shodanct.SearchShodanCt', ('example.test',), {}),
         ('sourcegraph', 'theHarvester.lib.source_runner.sourcegraph.SearchSourcegraph', ('example.test', 25), {}),
+        (
+            'subdomaincenter',
+            'theHarvester.lib.source_runner.subdomaincenter.SubdomainCenter',
+            ('example.test',),
+            {},
+        ),
+        (
+            'subdomainfinderc99',
+            'theHarvester.lib.source_runner.subdomainfinderc99.SearchSubdomainfinderc99',
+            ('example.test',),
+            {},
+        ),
+        ('thc', 'theHarvester.lib.source_runner.thc.SearchThc', ('example.test',), {}),
         ('tomba', 'theHarvester.lib.source_runner.tombasearch.SearchTomba', ('example.test', 25, 5), {}),
+        ('urlscan', 'theHarvester.lib.source_runner.urlscan.SearchUrlscan', ('example.test',), {}),
+        ('virustotal', 'theHarvester.lib.source_runner.virustotal.SearchVirustotal', ('example.test',), {}),
         (
             'waybackarchive',
             'theHarvester.lib.source_runner.waybackarchive.SearchWaybackarchive',
             ('example.test', 25),
             {},
         ),
+        ('whoisxml', 'theHarvester.lib.source_runner.whoisxml.SearchWhoisXML', ('example.test',), {}),
+        ('windvane', 'theHarvester.lib.source_runner.windvane.SearchWindvane', ('example.test',), {}),
         ('yahoo', 'theHarvester.lib.source_runner.yahoosearch.SearchYahoo', ('example.test', 25), {}),
         ('zoomeye', 'theHarvester.lib.source_runner.zoomeyesearch.SearchZoomEye', ('example.test', 25), {}),
     ],
@@ -158,6 +255,85 @@ async def test_runner_times_construction_and_records_missing_credentials(monkeyp
         'MissingKeyError',
         'missing-credentials',
     )
+
+
+@pytest.mark.asyncio
+async def test_start_reporter_failure_is_sanitized_and_does_not_change_provider_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    process_called = False
+
+    class SuccessfulAdapter:
+        async def process(self, _proxy: bool) -> None:
+            nonlocal process_called
+            process_called = True
+
+        async def get_hostnames(self) -> set[str]:
+            return {'fresh.example.test'}
+
+        async def get_emails(self) -> set[str]:
+            return set()
+
+        async def get_urls(self) -> set[str]:
+            return set()
+
+    def broken_reporter(_request: SourceRequest) -> None:
+        raise RuntimeError('sensitive callback payload')
+
+    monkeypatch.setitem(SOURCE_FACTORIES, 'apis-guru', lambda _request: SuccessfulAdapter())
+    caplog.set_level(logging.WARNING, logger='theHarvester.lib.source_runner')
+
+    outcome = await run_source(
+        SourceRequest('apis-guru', 'example.test', 25, 0, False, True),
+        on_started=broken_reporter,
+    )
+
+    assert process_called is True
+    assert outcome.execution.status == 'completed'
+    assert outcome.execution.error_type is None
+    assert outcome.observations == (ResultObservation('apis-guru', 'hostname', 'fresh.example.test'),)
+    assert 'Source start reporter failed for apis-guru: RuntimeError' in caplog.text
+    assert 'sensitive callback payload' not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_reporter_cancellation_propagates_without_collecting_pre_process_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellation = asyncio.CancelledError('reporter cancelled')
+    committed: list[SourceOutcome] = []
+    process_called = False
+    getter_called = False
+
+    class UnstartedAdapter:
+        async def process(self, _proxy: bool) -> None:
+            nonlocal process_called
+            process_called = True
+
+        async def get_hostnames(self) -> set[str]:
+            nonlocal getter_called
+            getter_called = True
+            return {'stale.example.test'}
+
+    def cancelled_reporter(_request: SourceRequest) -> None:
+        raise cancellation
+
+    monkeypatch.setitem(SOURCE_FACTORIES, 'apis-guru', lambda _request: UnstartedAdapter())
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await run_source(
+            SourceRequest('apis-guru', 'example.test', 25, 0, False, True),
+            commit_cancelled=committed.append,
+            on_started=cancelled_reporter,
+        )
+
+    assert raised.value is cancellation
+    assert process_called is False
+    assert getter_called is False
+    assert committed[0].execution.status == 'failed'
+    assert committed[0].execution.stop_reason == 'cancelled'
+    assert committed[0].observations == ()
 
 
 @pytest.mark.asyncio
