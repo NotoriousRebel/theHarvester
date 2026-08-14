@@ -13,8 +13,8 @@ import pytest
 from theHarvester.lib import virtual_host as virtual_host_module
 from theHarvester.lib.virtual_host import (
     VHOST_BODY_LIMIT,
+    HarvestedVirtualHostResult,
     ProbeObservation,
-    VirtualHostDiscoveryCancelled,
     VirtualHostDiscoveryResult,
     VirtualHostLimits,
     VirtualHostObservation,
@@ -371,9 +371,13 @@ async def test_harvested_virtual_host_sweep_keeps_same_endpoint_evidence_after_a
     assert result.scan_error_type == 'RuntimeError'
 
 
-async def test_harvested_virtual_host_sweep_cancellation_carries_partial_evidence(
+async def test_harvested_virtual_host_sweep_cancellation_commits_partial_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    committed: list[HarvestedVirtualHostResult] = []
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    endpoint_tasks: list[asyncio.Task[object]] = []
     second_endpoint_started = asyncio.Event()
     call_count = 0
 
@@ -391,10 +395,15 @@ async def test_harvested_virtual_host_sweep_cancellation_carries_partial_evidenc
                 request_count=5,
                 attempted_candidate_count=1,
             )
+        endpoint_task = asyncio.current_task()
+        assert endpoint_task is not None
+        endpoint_tasks.append(endpoint_task)
         second_endpoint_started.set()
         try:
-            await asyncio.sleep(1)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
+            cleanup_started.set()
+            await cleanup_release.wait()
             return discovery_result(
                 observations=(distinct_observation(request.endpoint),),
                 request_count=5,
@@ -409,15 +418,21 @@ async def test_harvested_virtual_host_sweep_cancellation_carries_partial_evidenc
             addresses=('192.0.2.20',),
             candidates=('admin.example.com',),
             limits=VirtualHostLimits(request_limit=10, runtime_seconds=10),
+            commit_cancelled=committed.append,
         )
     )
     await second_endpoint_started.wait()
-    task.cancel()
+    task.cancel('operator-stop-first')
+    await cleanup_started.wait()
+    task.cancel('operator-stop-second')
+    cleanup_release.set()
 
-    with pytest.raises(VirtualHostDiscoveryCancelled) as cancelled:
+    with pytest.raises(asyncio.CancelledError, match='operator-stop-first') as cancelled:
         await task
 
-    result = cancelled.value.result
+    assert type(cancelled.value) is asyncio.CancelledError
+    assert endpoint_tasks[0].done()
+    result = committed[-1]
     assert tuple(observation.endpoint for observation in result.observations) == (
         'https://192.0.2.20:443/',
         'http://192.0.2.20:80/',
@@ -431,7 +446,9 @@ async def test_harvested_virtual_host_sweep_cancellation_carries_partial_evidenc
 async def test_harvested_virtual_host_sweep_propagates_cancellation_during_deadline_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    committed: list[HarvestedVirtualHostResult] = []
     deadline_cancelled = asyncio.Event()
+    cleanup_release = asyncio.Event()
 
     async def fake_discover(
         _request: VirtualHostRequest,
@@ -444,13 +461,21 @@ async def test_harvested_virtual_host_sweep_propagates_cancellation_during_deadl
         except asyncio.CancelledError:
             deadline_cancelled.set()
             try:
-                await asyncio.sleep(1)
+                await cleanup_release.wait()
             except asyncio.CancelledError:
+                await cleanup_release.wait()
                 return discovery_result(
+                    observations=(distinct_observation(_request.endpoint),),
                     request_count=1,
-                    attempted_candidate_count=0,
+                    attempted_candidate_count=1,
                     stop_reason='runtime-limit',
                 )
+            return discovery_result(
+                observations=(distinct_observation(_request.endpoint),),
+                request_count=1,
+                attempted_candidate_count=1,
+                stop_reason='runtime-limit',
+            )
 
     monkeypatch.setattr(virtual_host_module, 'discover_virtual_hosts', fake_discover)
     task = asyncio.create_task(
@@ -459,13 +484,134 @@ async def test_harvested_virtual_host_sweep_propagates_cancellation_during_deadl
             addresses=('192.0.2.20',),
             candidates=('admin.example.com',),
             limits=VirtualHostLimits(request_limit=10, runtime_seconds=0.02),
+            commit_cancelled=committed.append,
         )
     )
     await deadline_cancelled.wait()
-    task.cancel()
+    task.cancel('operator-stop-first')
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel('operator-stop-second')
+    cleanup_release.set()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError, match='operator-stop-first') as cancelled:
         await task
+
+    assert type(cancelled.value) is asyncio.CancelledError
+    assert committed[-1].observations
+    assert committed[-1].stop_reason == 'cancelled'
+    assert committed[-1].scan_error_type == 'CancelledError'
+
+
+async def test_discovery_repeated_cancellation_drains_every_probe_and_preserves_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = {'admin.example.com', 'portal.example.com'}
+    probes_started = asyncio.Event()
+    probes_cancelled = asyncio.Event()
+    release_probes = asyncio.Event()
+    probe_tasks: list[asyncio.Task[object]] = []
+    cancelled: set[str] = set()
+
+    async def fake_probe(
+        _session: object,
+        _request: VirtualHostRequest,
+        hostname: str | None,
+    ) -> ProbeObservation:
+        probe_hostname = hostname or '192.0.2.20'
+        if probe_hostname not in candidates:
+            return response(probe_hostname)
+        task = asyncio.current_task()
+        assert task is not None
+        probe_tasks.append(task)
+        if len(probe_tasks) == len(candidates):
+            probes_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.add(probe_hostname)
+            if cancelled == candidates:
+                probes_cancelled.set()
+            await release_probes.wait()
+            return response(probe_hostname, status=401)
+
+    monkeypatch.setattr(virtual_host_module, '_probe', fake_probe)
+    operation = asyncio.create_task(
+        discover_virtual_hosts(
+            VirtualHostRequest(
+                endpoint='http://192.0.2.20/',
+                scope='example.com',
+                candidates=tuple(sorted(candidates)),
+                limits=VirtualHostLimits(concurrency=2),
+            )
+        )
+    )
+    await probes_started.wait()
+    operation.cancel('operator-stop-first')
+    await probes_cancelled.wait()
+    operation.cancel('operator-stop-second')
+    release_probes.set()
+
+    with pytest.raises(asyncio.CancelledError, match='operator-stop-first'):
+        await operation
+
+    assert all(task.done() for task in probe_tasks)
+
+
+async def test_discovery_repeated_cancellation_finishes_session_close_and_preserves_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_started = asyncio.Event()
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+    sessions: list[object] = []
+
+    class BlockingSession:
+        def __init__(self, **_kwargs: object) -> None:
+            self.closed = False
+            sessions.append(self)
+
+        async def __aenter__(self) -> 'BlockingSession':
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            close_started.set()
+            await close_release.wait()
+            self.closed = True
+
+    async def blocking_probe(
+        _session: object,
+        _request: VirtualHostRequest,
+        _hostname: str | None,
+    ) -> ProbeObservation:
+        probe_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError('cancelled probe resumed')
+
+    monkeypatch.setattr(virtual_host_module.aiohttp, 'TCPConnector', lambda **_kwargs: object())
+    monkeypatch.setattr(virtual_host_module.aiohttp, 'ClientSession', BlockingSession)
+    monkeypatch.setattr(virtual_host_module, '_probe', blocking_probe)
+    operation = asyncio.create_task(
+        discover_virtual_hosts(
+            VirtualHostRequest(
+                endpoint='http://192.0.2.20/',
+                scope='example.com',
+                candidates=('admin.example.com',),
+            )
+        )
+    )
+    await probe_started.wait()
+    operation.cancel('operator-stop-first')
+    await close_started.wait()
+    operation.cancel('operator-stop-second')
+    await asyncio.sleep(0)
+    close_release.set()
+
+    with pytest.raises(asyncio.CancelledError, match='operator-stop-first') as cancelled:
+        await operation
+
+    assert type(cancelled.value) is asyncio.CancelledError
+    assert sessions[0].closed is True
 
 
 def test_classifier_marks_a_candidate_matching_stable_controls_as_default() -> None:

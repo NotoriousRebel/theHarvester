@@ -25,7 +25,6 @@ from theHarvester.lib.recursive_dns import RecursiveDNSClassification, Recursive
 from theHarvester.lib.routeviews import RouteViewsCancelled, RouteViewsResult
 from theHarvester.lib.virtual_host import (
     HarvestedVirtualHostResult,
-    VirtualHostDiscoveryCancelled,
     VirtualHostObservation,
 )
 
@@ -386,10 +385,12 @@ async def test_virtual_host_action_reports_mixed_or_scan_errors_as_partial(
 
 
 @pytest.mark.asyncio
-async def test_virtual_host_cancellation_persists_partial_observations_and_propagates(
+async def test_virtual_host_cancellation_checkpoints_partial_observations_and_propagates_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    checkpoints: list[CompletedResult] = []
     saved: list[CompletedResult] = []
+    cancellation = asyncio.CancelledError('operator-stop')
     partial = HarvestedVirtualHostResult(
         observations=(_confirmed_vhost(),),
         request_count=5,
@@ -403,13 +404,59 @@ async def test_virtual_host_cancellation_persists_partial_observations_and_propa
         scan_error_type='CancelledError',
     )
 
-    async def cancelled_discovery(**_kwargs: object) -> HarvestedVirtualHostResult:
-        raise VirtualHostDiscoveryCancelled(partial)
+    async def cancelled_discovery(*, commit_cancelled, **_kwargs: object) -> HarvestedVirtualHostResult:
+        commit_cancelled(partial)
+        raise cancellation
+
+    async def capture_checkpoint(result: CompletedResult) -> None:
+        if any(execution.action == 'vhost' for execution in result.active_evidence.executions):
+            checkpoints.append(result)
+            raise RuntimeError('checkpoint failed')
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
     monkeypatch.setattr(theharvester_main, 'discover_harvested_virtual_hosts', cancelled_discovery)
 
-    with pytest.raises(VirtualHostDiscoveryCancelled):
+    with pytest.raises(asyncio.CancelledError, match='operator-stop') as raised:
+        await theharvester_main.start(
+            EnumerationOptions(
+                domain='example.com',
+                quiet=True,
+                vhost_endpoint='http://192.0.2.10/',
+                vhost_candidates=('admin.example.com',),
+            ),
+            completed_result_checkpoint=capture_checkpoint,
+            return_completed_result=True,
+        )
+
+    assert raised.value is cancellation
+    completed = checkpoints[-1]
+    execution = next(item for item in completed.active_evidence.executions if item.action == 'vhost')
+    assert execution.status == 'partial'
+    assert execution.error_type == 'CancelledError'
+    assert execution.stop_reason == 'cancelled'
+    assert completed.virtual_hosts == (_confirmed_vhost(),)
+    assert saved[-1] == completed
+
+
+@pytest.mark.asyncio
+async def test_virtual_host_cancellation_preserves_the_first_error_when_persistence_cancels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_cancellation = asyncio.CancelledError('operator-stop')
+    persistence_cancellation = asyncio.CancelledError('persistence-stop')
+
+    class CancellingResultStore(_NoopResultStore):
+        async def save_run(self, _result: CompletedResult) -> None:
+            raise persistence_cancellation
+
+    async def cancelled_discovery(*, commit_cancelled, **_kwargs: object) -> HarvestedVirtualHostResult:
+        commit_cancelled(HarvestedVirtualHostResult((_confirmed_vhost(),), 5, 1, 1, 1, 1, 'cancelled'))
+        raise first_cancellation
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', CancellingResultStore)
+    monkeypatch.setattr(theharvester_main, 'discover_harvested_virtual_hosts', cancelled_discovery)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
         await theharvester_main.start(
             EnumerationOptions(
                 domain='example.com',
@@ -420,19 +467,118 @@ async def test_virtual_host_cancellation_persists_partial_observations_and_propa
             return_completed_result=True,
         )
 
-    completed = saved[-1]
-    execution = next(item for item in completed.active_evidence.executions if item.action == 'vhost')
-    assert execution.status == 'partial'
-    assert execution.error_type == 'CancelledError'
-    assert execution.stop_reason == 'cancelled'
-    assert completed.virtual_hosts == (_confirmed_vhost(),)
+    assert raised.value is first_cancellation
+
+
+@pytest.mark.asyncio
+async def test_virtual_host_repeated_cancellation_finishes_checkpoint_and_preserves_the_first_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_cancellation = asyncio.CancelledError('operator-stop-first')
+    checkpoint_started = asyncio.Event()
+    checkpoint_release = asyncio.Event()
+    checkpoint_finished = asyncio.Event()
+    checkpoint_cancelled = asyncio.Event()
+    saved: list[CompletedResult] = []
+
+    async def cancelled_discovery(*, commit_cancelled, **_kwargs: object) -> HarvestedVirtualHostResult:
+        commit_cancelled(HarvestedVirtualHostResult((_confirmed_vhost(),), 5, 1, 1, 1, 1, 'cancelled'))
+        raise first_cancellation
+
+    async def checkpoint(result: CompletedResult) -> None:
+        if not any(execution.action == 'vhost' for execution in result.active_evidence.executions):
+            return
+        checkpoint_started.set()
+        try:
+            await checkpoint_release.wait()
+        except asyncio.CancelledError:
+            checkpoint_cancelled.set()
+            raise
+        checkpoint_finished.set()
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
+    monkeypatch.setattr(theharvester_main, 'discover_harvested_virtual_hosts', cancelled_discovery)
+    operation = asyncio.create_task(
+        theharvester_main.start(
+            EnumerationOptions(
+                domain='example.com',
+                quiet=True,
+                vhost_endpoint='http://192.0.2.10/',
+                vhost_candidates=('admin.example.com',),
+            ),
+            completed_result_checkpoint=checkpoint,
+            return_completed_result=True,
+        )
+    )
+    await checkpoint_started.wait()
+    operation.cancel('operator-stop-second')
+    await asyncio.sleep(0)
+    checkpoint_release.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await operation
+
+    assert raised.value is first_cancellation
+    assert checkpoint_finished.is_set()
+    assert not checkpoint_cancelled.is_set()
+    assert saved[-1].virtual_hosts == (_confirmed_vhost(),)
+
+
+@pytest.mark.asyncio
+async def test_virtual_host_repeated_cancellation_finishes_persistence_and_preserves_the_first_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_cancellation = asyncio.CancelledError('operator-stop-first')
+    persistence_started = asyncio.Event()
+    persistence_release = asyncio.Event()
+    persistence_finished = asyncio.Event()
+    persistence_cancelled = asyncio.Event()
+
+    class BlockingResultStore(_NoopResultStore):
+        async def save_run(self, _result: CompletedResult) -> None:
+            persistence_started.set()
+            try:
+                await persistence_release.wait()
+            except asyncio.CancelledError:
+                persistence_cancelled.set()
+                raise
+            persistence_finished.set()
+
+    async def cancelled_discovery(*, commit_cancelled, **_kwargs: object) -> HarvestedVirtualHostResult:
+        commit_cancelled(HarvestedVirtualHostResult((_confirmed_vhost(),), 5, 1, 1, 1, 1, 'cancelled'))
+        raise first_cancellation
+
+    monkeypatch.setattr(theharvester_main, 'ResultStore', BlockingResultStore)
+    monkeypatch.setattr(theharvester_main, 'discover_harvested_virtual_hosts', cancelled_discovery)
+    operation = asyncio.create_task(
+        theharvester_main.start(
+            EnumerationOptions(
+                domain='example.com',
+                quiet=True,
+                vhost_endpoint='http://192.0.2.10/',
+                vhost_candidates=('admin.example.com',),
+            ),
+            return_completed_result=True,
+        )
+    )
+    await persistence_started.wait()
+    operation.cancel('operator-stop-second')
+    await asyncio.sleep(0)
+    persistence_release.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await operation
+
+    assert raised.value is first_cancellation
+    assert persistence_finished.is_set()
+    assert not persistence_cancelled.is_set()
 
 
 @pytest.mark.asyncio
 async def test_virtual_host_cancellation_persists_failure_and_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
     saved: list[CompletedResult] = []
 
-    async def cancelled_discovery(**_kwargs: object) -> HarvestedVirtualHostResult:
+    async def cancelled_discovery(*, commit_cancelled, **_kwargs: object) -> HarvestedVirtualHostResult:
         raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
@@ -456,7 +602,7 @@ async def test_virtual_host_cancellation_persists_failure_and_propagates(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_virtual_host_carried_cancellation_without_a_finding_is_failed(
+async def test_virtual_host_committed_cancellation_without_a_finding_is_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved: list[CompletedResult] = []
@@ -471,13 +617,14 @@ async def test_virtual_host_carried_cancellation_without_a_finding_is_failed(
         scan_error_type='CancelledError',
     )
 
-    async def cancelled_discovery(**_kwargs: object) -> HarvestedVirtualHostResult:
-        raise VirtualHostDiscoveryCancelled(cancelled)
+    async def cancelled_discovery(*, commit_cancelled, **_kwargs: object) -> HarvestedVirtualHostResult:
+        commit_cancelled(cancelled)
+        raise asyncio.CancelledError
 
     monkeypatch.setattr(theharvester_main, 'ResultStore', _recording_result_store(saved))
     monkeypatch.setattr(theharvester_main, 'discover_harvested_virtual_hosts', cancelled_discovery)
 
-    with pytest.raises(VirtualHostDiscoveryCancelled):
+    with pytest.raises(asyncio.CancelledError):
         await theharvester_main.start(
             EnumerationOptions(
                 domain='example.com',
