@@ -451,9 +451,17 @@ async def test_fetch_rejects_a_buffered_response_over_the_explicit_byte_limit(mo
     monkeypatch.setattr(core_module.ssl, 'create_default_context', lambda cafile=None: 'ssl-context')
     monkeypatch.setattr(core_module.certifi, 'where', lambda: '/tmp/cacert.pem')
 
-    with pytest.raises(ResponseStreamError, match='response-limit'):
+    def oversized_response(self, method: str, url: str, **kwargs):
+        self.requests.append((method, url, kwargs))
+        return DummyResponse(status=206, headers={'Content-Type': 'application/json', 'X-Evidence': 'kept'})
+
+    monkeypatch.setattr(DummySession, 'request', oversized_response)
+
+    with pytest.raises(ResponseStreamError, match='response-limit') as raised:
         await AsyncFetcher.fetch(url='https://example.com', include_metadata=True, response_byte_limit=4)
 
+    assert raised.value.status == 206
+    assert raised.value.headers == {'content-type': 'application/json', 'x-evidence': 'kept'}
     assert DummySession.instances[0].closed is True
 
 

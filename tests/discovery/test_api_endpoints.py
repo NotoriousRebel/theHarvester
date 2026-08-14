@@ -1,4 +1,5 @@
 import asyncio
+import json
 import ssl
 import subprocess
 from pathlib import Path
@@ -103,8 +104,38 @@ def test_process_response_parses_json_once_independent_of_technology_count(monke
 
     assert result is not None
     assert result.parameters == ['openapi', 'first', 'second']
-    assert search.get_schema_detected() == {'https://example.com/swagger': {'openapi': '3.0', 'first': 1, 'second': 2}}
+    assert search.get_schema_detected() == {
+        'https://example.com/swagger': {
+            'format': 'openapi',
+            'version': '3.0',
+            'parameter_names': ['openapi', 'first', 'second'],
+        }
+    }
     assert parse_count == 1
+
+
+def test_schema_metadata_does_not_retain_raw_documents() -> None:
+    search = api_endpoints.SearchApiEndpoints('example.com')
+    document = {
+        'openapi': '3.1.0',
+        'paths': {f'/resource/{index}': {'description': 'x' * 2048} for index in range(64)},
+    }
+    content = json.dumps(document).encode()
+
+    for index in range(10):
+        search._process_response(
+            f'https://example.com/openapi/{index}',
+            'GET',
+            SimpleNamespace(status=200, headers={'content-type': 'application/json'}, body=content),
+            0.1,
+        )
+
+    metadata = search.get_schema_detected()
+    assert len(content) * len(metadata) > 1024 * 1024
+    assert all(
+        item == {'format': 'openapi', 'version': '3.1.0', 'parameter_names': ['openapi', 'paths']} for item in metadata.values()
+    )
+    assert len(json.dumps(metadata)) < 4096
 
 
 def test_api_endpoint_scan_defaults_to_direct_requests_with_redirects() -> None:
@@ -113,7 +144,16 @@ def test_api_endpoint_scan_defaults_to_direct_requests_with_redirects() -> None:
     assert search.proxy is None
     assert search.follow_redirects is True
     assert search.concurrency == 10
+    assert search.request_limit is None
+    assert search.runtime_seconds is None
     assert api_endpoints.SearchApiEndpoints('example.com', concurrency=20).concurrency == 20
+
+
+def test_api_endpoint_scan_accepts_explicitly_unlimited_library_overrides() -> None:
+    search = api_endpoints.SearchApiEndpoints('example.com', request_limit=None, runtime_seconds=None)
+
+    assert search.request_limit is None
+    assert search.runtime_seconds is None
 
 
 @pytest.mark.parametrize('concurrency', [0, -1, True, 1.5])
@@ -145,8 +185,8 @@ def test_api_endpoint_scan_rejects_nonfinite_time_budgets(option: str, value: fl
 
 @pytest.mark.asyncio
 async def test_api_endpoint_scan_bounds_active_and_pending_work_and_preserves_order(monkeypatch) -> None:
-    search = api_endpoints.SearchApiEndpoints('example.com', concurrency=3, exact_paths=True, request_limit=1_001)
-    paths = [f'/api/{index}' for index in range(1_000)]
+    search = api_endpoints.SearchApiEndpoints('example.com', concurrency=3, exact_paths=True)
+    paths = [f'/api/{index}' for index in range(1_001)]
     active = 0
     peak_active = 0
     peak_pending = 0
@@ -181,6 +221,7 @@ async def test_api_endpoint_scan_bounds_active_and_pending_work_and_preserves_or
 
     expected_urls = [f'https://example.com{path}' for path in paths]
     assert [result['url'] for result in search.get_detailed_results()] == expected_urls
+    assert search.request_count == len(paths) + 1  # schema detection plus every endpoint
     assert peak_active == 3
     assert peak_pending <= 3
     assert not any(task.get_name().startswith('api-endpoint-worker-') for task in asyncio.all_tasks())
@@ -532,104 +573,84 @@ async def test_api_endpoint_scan_preserves_first_cancellation_while_closing_sess
 
 
 @pytest.mark.asyncio
-async def test_api_endpoint_scan_stops_with_a_truthful_response_body_reason(monkeypatch) -> None:
+async def test_api_endpoint_scan_keeps_oversized_response_evidence_and_scans_siblings(monkeypatch) -> None:
     search = api_endpoints.SearchApiEndpoints(
         'example.com',
         concurrency=1,
         exact_paths=True,
         response_body_limit=4,
     )
-    monkeypatch.setattr(search, '_load_wordlist', lambda: ['/large', '/unreached'])
-    monkeypatch.setattr(search, '_detect_schema', lambda _path='': asyncio.sleep(0, result='https'))
-
-    async def fetch(*_args, **kwargs) -> FetcherResponse:
-        assert kwargs['response_byte_limit'] == 4
-        raise ResponseStreamError('response-limit')
-
-    monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fetch)
-
-    await search.do_search()
-
-    assert search.stop_reason == 'response-limit'
-    assert search.scan_error_type is None
-    assert search.request_error_count == 1
-    assert search.request_error_types == {'ResponseLimitError'}
-    assert search.request_count == 2
-    assert search.get_found_endpoints() == {}
-
-
-@pytest.mark.asyncio
-async def test_api_endpoint_scan_stops_before_small_responses_exceed_the_cumulative_body_budget(monkeypatch) -> None:
-    search = api_endpoints.SearchApiEndpoints(
-        'example.com',
-        concurrency=1,
-        exact_paths=True,
-        response_body_limit=5,
-    )
     requested_urls: list[str] = []
-    monkeypatch.setattr(search, '_load_wordlist', lambda: ['/one', '/two', '/three', '/unreached'])
+    monkeypatch.setattr(search, '_load_wordlist', lambda: ['/large', '/sibling'])
     monkeypatch.setattr(search, '_detect_schema', lambda _path='': asyncio.sleep(0, result='https'))
 
     async def fetch(*_args, url: str = '', **kwargs) -> FetcherResponse:
         requested_urls.append(url)
-        assert kwargs['response_byte_limit'] == 5
-        if not await kwargs['response_byte_account'](2):
-            raise ResponseStreamError('response-limit')
-        return FetcherResponse(body='ok', status=200, headers={})
+        assert kwargs['response_byte_limit'] == 4
+        assert 'response_byte_account' not in kwargs
+        if url.endswith('/large'):
+            raise ResponseStreamError(
+                'response-limit',
+                status=206,
+                headers={
+                    'allow': 'GET, HEAD, OPTIONS',
+                    'content-type': 'application/json',
+                    'set-cookie': 'secret',
+                    'x-api-key': 'reflected-secret',
+                    'x-auth-token': 'reflected-secret',
+                    'x-csrf-token': 'reflected-secret',
+                },
+            )
+        return FetcherResponse(body='{}', status=200, headers={})
 
     monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fetch)
 
     await search.do_search()
 
-    assert requested_urls == [
+    assert search.stop_reason is None
+    assert search.scan_error_type is None
+    assert search.request_error_count == 1
+    assert search.request_error_types == {'ResponseLimitError'}
+    assert search.request_count == 3
+    assert requested_urls == ['https://example.com/large', 'https://example.com/sibling']
+    large = search.get_found_endpoints()['https://example.com/large']
+    assert large.status_code == 206
+    assert large.response_headers == {
+        'allow': 'GET, HEAD, OPTIONS',
+        'content-type': 'application/json',
+    }
+    assert large.body_truncated is True
+    assert list(search.get_found_endpoints()) == requested_urls
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_scan_accepts_bodies_over_the_former_cumulative_budget(monkeypatch) -> None:
+    search = api_endpoints.SearchApiEndpoints(
+        'example.com',
+        concurrency=1,
+        exact_paths=True,
+        response_body_limit=512 * 1024,
+    )
+    monkeypatch.setattr(search, '_load_wordlist', lambda: ['/one', '/two', '/three'])
+    monkeypatch.setattr(search, '_detect_schema', lambda _path='': asyncio.sleep(0, result='https'))
+
+    async def fetch(*_args, **kwargs) -> FetcherResponse:
+        assert kwargs['response_byte_limit'] == 512 * 1024
+        assert 'response_byte_account' not in kwargs
+        return FetcherResponse(body='x' * (512 * 1024), status=200, headers={})
+
+    monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fetch)
+
+    await search.do_search()
+
+    assert list(search.get_found_endpoints()) == [
         'https://example.com/one',
         'https://example.com/two',
         'https://example.com/three',
     ]
-    assert list(search.get_found_endpoints()) == [
-        'https://example.com/one',
-        'https://example.com/two',
-    ]
-    assert search.response_body_bytes == 4
-    assert search.response_body_bytes <= search.response_body_limit
-    assert search.stop_reason == 'response-limit'
-    assert search.request_error_types == {'ResponseLimitError'}
-
-
-@pytest.mark.asyncio
-async def test_api_endpoint_scan_accounts_for_the_cumulative_body_budget_concurrently(monkeypatch) -> None:
-    paths = ['/one', '/two', '/three']
-    search = api_endpoints.SearchApiEndpoints(
-        'example.com',
-        concurrency=3,
-        exact_paths=True,
-        response_body_limit=5,
-    )
-    all_started = asyncio.Event()
-    started = 0
-    monkeypatch.setattr(search, '_load_wordlist', lambda: paths)
-    monkeypatch.setattr(search, '_detect_schema', lambda _path='': asyncio.sleep(0, result='https'))
-
-    async def fetch(*_args, **kwargs) -> FetcherResponse:
-        nonlocal started
-        started += 1
-        if started == len(paths):
-            all_started.set()
-        await all_started.wait()
-        if not await kwargs['response_byte_account'](2):
-            raise ResponseStreamError('response-limit')
-        return FetcherResponse(body='ok', status=200, headers={})
-
-    monkeypatch.setattr(api_endpoints.AsyncFetcher, 'fetch', fetch)
-
-    await search.do_search()
-
-    expected_order = [f'https://example.com{path}' for path in paths]
-    assert len(search.get_found_endpoints()) == 2
-    assert list(search.get_found_endpoints()) == [url for url in expected_order if url in search.get_found_endpoints()]
-    assert search.response_body_bytes == 4
-    assert search.response_body_bytes <= search.response_body_limit
-    assert search.stop_reason == 'response-limit'
+    assert sum(search.response_sizes.values()) > 1024 * 1024
+    assert search.stop_reason is None
+    assert search.request_error_count == 0
 
 
 @pytest.mark.asyncio

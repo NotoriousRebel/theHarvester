@@ -44,8 +44,16 @@ StreamFraming = Literal['ndjson', 'sse']
 
 
 class ResponseStreamError(Exception):
-    def __init__(self, reason: StreamErrorReason) -> None:
+    def __init__(
+        self,
+        reason: StreamErrorReason,
+        *,
+        status: int | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.reason = reason
+        self.status = status
+        self.headers = headers or {}
         super().__init__(reason)
 
 
@@ -508,13 +516,19 @@ class AsyncFetcher:
         if response_byte_limit is not None:
             response_headers = {name.lower(): value for name, value in response.headers.items()}
             try:
-                if int(response_headers.get('content-length', '0')) > response_byte_limit:
-                    raise ResponseStreamError('response-limit')
-            except ValueError:
-                pass
-            body_bytes = bytearray()
-            async for chunk in _bounded_response_chunks(response.content, response_byte_limit, response_byte_account):
-                body_bytes.extend(chunk)
+                try:
+                    if int(response_headers.get('content-length', '0')) > response_byte_limit:
+                        raise ResponseStreamError('response-limit')
+                except ValueError:
+                    pass
+                body_bytes = bytearray()
+                async for chunk in _bounded_response_chunks(response.content, response_byte_limit, response_byte_account):
+                    body_bytes.extend(chunk)
+            except ResponseStreamError as error:
+                if error.status is None:
+                    error.status = response.status
+                    error.headers = response_headers
+                raise
             text_body = bytes(body_bytes).decode(getattr(response, 'charset', None) or 'utf-8', errors='replace')
             if json and text_body.strip():
                 try:

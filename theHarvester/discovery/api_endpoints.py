@@ -15,9 +15,20 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from theHarvester.lib.core import AsyncFetcher, Core, ResponseStreamError
+from theHarvester.lib.core import AsyncFetcher, Core, FetcherResponse, ResponseStreamError
 
 logger = logging.getLogger(__name__)
+_DIAGNOSTIC_RESPONSE_HEADERS = {
+    'allow',
+    'content-encoding',
+    'content-length',
+    'content-type',
+    'location',
+    'retry-after',
+    'www-authenticate',
+}
+_MAX_SCHEMA_METADATA_PARAMETER_NAMES = 20
+_MAX_SCHEMA_METADATA_VALUE_LENGTH = 128
 
 
 async def _drain_owned_tasks(
@@ -54,6 +65,7 @@ class EndpointResult:
     url: str
     status_code: int = 0
     method: str = ''
+    response_headers: dict[str, str] = field(default_factory=dict)
     content_type: str = ''
     content_length: int = 0
     response_time: float = 0.0
@@ -63,6 +75,7 @@ class EndpointResult:
     rate_limit_headers: dict[str, str] = field(default_factory=dict)
     security_headers: dict[str, str] = field(default_factory=dict)
     content_preview: str = ''
+    body_truncated: bool = False
     interesting: bool = False
     tech_stack: list[str] = field(default_factory=list)
     parameters: list[str] = field(default_factory=list)
@@ -92,8 +105,8 @@ class SearchApiEndpoints:
         verify_ssl: bool = True,
         additional_headers: dict[str, str] | None = None,
         exact_paths: bool = False,
-        request_limit: int = 1_000,
-        runtime_seconds: float = 300,
+        request_limit: int | None = None,
+        runtime_seconds: float | None = None,
         response_body_limit: int = 1024 * 1024,
     ) -> None:
         """Configure an API path scan.
@@ -109,18 +122,20 @@ class SearchApiEndpoints:
             verify_ssl: Whether to verify TLS certificates.
             additional_headers: Extra HTTP headers to send.
             exact_paths: Check only paths listed in the configured wordlist.
-            request_limit: Maximum requests across schema detection, endpoint methods, and retries.
-            runtime_seconds: Maximum wall-clock runtime for the endpoint scan.
-            response_body_limit: Maximum response body bytes accepted across the endpoint scan.
+            request_limit: Optional maximum requests across schema detection, endpoint methods, and retries.
+            runtime_seconds: Optional maximum wall-clock runtime for the endpoint scan.
+            response_body_limit: Maximum response body bytes accepted per response.
 
         """
         if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency <= 0:
             raise ValueError('concurrency must be a positive integer')
         if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('timeout must be positive')
-        if isinstance(request_limit, bool) or not isinstance(request_limit, int) or request_limit <= 0:
+        if request_limit is not None and (
+            isinstance(request_limit, bool) or not isinstance(request_limit, int) or request_limit <= 0
+        ):
             raise ValueError('request_limit must be a positive integer')
-        if (
+        if runtime_seconds is not None and (
             isinstance(runtime_seconds, bool)
             or not isinstance(runtime_seconds, int | float)
             or not math.isfinite(runtime_seconds)
@@ -158,8 +173,6 @@ class SearchApiEndpoints:
         self.request_count = 0
         self.runtime_seconds = runtime_seconds
         self.response_body_limit = response_body_limit
-        self.response_body_bytes = 0
-        self._response_body_lock: asyncio.Lock | None = None
         self.stop_reason: str | None = None
 
         # Set default wordlist path
@@ -458,13 +471,11 @@ class SearchApiEndpoints:
         self.request_error_count = 0
         self.request_error_types.clear()
         self.request_count = 0
-        self.response_body_bytes = 0
-        self._response_body_lock = asyncio.Lock()
         self.stop_reason = None
         session: aiohttp.ClientSession | None = None
         cancellation: asyncio.CancelledError | None = None
         close_error: BaseException | None = None
-        deadline = asyncio.get_running_loop().time() + self.runtime_seconds
+        deadline = None if self.runtime_seconds is None else asyncio.get_running_loop().time() + self.runtime_seconds
         try:
             self.logger.info(f'Starting API endpoint scan for {self.word}')
 
@@ -567,20 +578,11 @@ class SearchApiEndpoints:
             setattr(self, collection_name, {url: collection[url] for url in urls if url in collection})
 
     def _claim_request(self) -> bool:
-        if self.request_count >= self.request_limit:
+        if self.request_limit is not None and self.request_count >= self.request_limit:
             self.stop_reason = 'request-limit'
             return False
         self.request_count += 1
         return True
-
-    async def _claim_response_body_bytes(self, count: int) -> bool:
-        assert self._response_body_lock is not None
-        async with self._response_body_lock:
-            if count > self.response_body_limit - self.response_body_bytes:
-                self.stop_reason = 'response-limit'
-                return False
-            self.response_body_bytes += count
-            return True
 
     @classmethod
     def _retry_delay(cls, headers: dict[str, str], attempt: int) -> float:
@@ -661,7 +663,7 @@ class SearchApiEndpoints:
 
         for method in methods:
             for attempt in range(self.MAX_RETRIES + 1):
-                if self.stop_reason in {'request-limit', 'runtime-limit', 'response-limit'}:
+                if self.stop_reason in {'request-limit', 'runtime-limit'}:
                     return None
                 if not self._claim_request():
                     return None
@@ -681,7 +683,6 @@ class SearchApiEndpoints:
                         request_timeout=self.timeout,
                         include_metadata=True,
                         response_byte_limit=self.response_body_limit,
-                        response_byte_account=self._claim_response_body_bytes,
                     )
 
                     # Calculate response time
@@ -696,7 +697,7 @@ class SearchApiEndpoints:
                         break
                     if response.status in {429, 503}:
                         if attempt < self.MAX_RETRIES:
-                            if self.stop_reason in {'request-limit', 'runtime-limit', 'response-limit'}:
+                            if self.stop_reason in {'request-limit', 'runtime-limit'}:
                                 return result
                             await asyncio.sleep(self._retry_delay(response.headers, attempt))
                             continue
@@ -712,8 +713,16 @@ class SearchApiEndpoints:
                     self.request_error_count += 1
                     if error.reason == 'response-limit':
                         self.request_error_types.add('ResponseLimitError')
-                        self.stop_reason = 'response-limit'
-                        return None
+                        response_time = asyncio.get_running_loop().time() - start_time
+                        if error.status is not None:
+                            return self._process_response(
+                                url,
+                                method,
+                                FetcherResponse(body='', status=error.status, headers=error.headers),
+                                response_time,
+                                body_truncated=True,
+                            )
+                        break
                     self.request_error_types.add('TransportError')
                     break
                 except TimeoutError:
@@ -743,7 +752,15 @@ class SearchApiEndpoints:
 
         return headers
 
-    def _process_response(self, url: str, method: str, response, response_time: float) -> EndpointResult | None:
+    def _process_response(
+        self,
+        url: str,
+        method: str,
+        response,
+        response_time: float,
+        *,
+        body_truncated: bool = False,
+    ) -> EndpointResult | None:
         """Process and categorize API endpoint response with detailed analysis.
 
         Returns:
@@ -766,6 +783,7 @@ class SearchApiEndpoints:
         except (TypeError, ValueError, AttributeError) as e:
             self.logger.error(f'Failed to get headers from response for URL {url}: {e}')
             headers = {}
+        response_headers = {name: value for name, value in headers.items() if name.casefold() in _DIAGNOSTIC_RESPONSE_HEADERS}
 
         try:
             content_value = getattr(response, 'body', getattr(response, 'content', b''))
@@ -863,6 +881,7 @@ class SearchApiEndpoints:
             url=url,
             status_code=status,
             method=method,
+            response_headers=response_headers,
             content_type=content_type,
             content_length=content_length,
             response_time=response_time,
@@ -872,6 +891,7 @@ class SearchApiEndpoints:
             rate_limit_headers=rate_limit_headers,
             security_headers=security_headers,
             content_preview=content_preview,
+            body_truncated=body_truncated,
             interesting=interesting,
             tech_stack=tech_stack,
             parameters=parameters[:20],  # Limit to first 20 params
@@ -905,8 +925,16 @@ class SearchApiEndpoints:
             self.schema_detected.pop(url, None)
         if schema_url and content:
             if isinstance(json_data, dict):
-                if 'swagger' in json_data or 'openapi' in json_data:
-                    self.schema_detected[url] = json_data
+                schema_format = 'openapi' if 'openapi' in json_data else 'swagger' if 'swagger' in json_data else ''
+                if schema_format:
+                    version = json_data[schema_format]
+                    self.schema_detected[url] = {
+                        'format': schema_format,
+                        'version': version[:_MAX_SCHEMA_METADATA_VALUE_LENGTH] if isinstance(version, str) else '',
+                        'parameter_names': [
+                            name[:_MAX_SCHEMA_METADATA_VALUE_LENGTH] for name in json_data if isinstance(name, str)
+                        ][:_MAX_SCHEMA_METADATA_PARAMETER_NAMES],
+                    }
                 else:
                     self.logger.warning(f"JSON at {url} loaded successfully but no 'swagger' or 'openapi' key found.")
             elif json_data is not None:

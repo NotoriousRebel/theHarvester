@@ -2374,7 +2374,7 @@ async def start(
                 api_scan_status = 'partial' if any(api_action_groups.values()) else 'failed'
                 api_error_type = api_scan_error
                 api_stop_reason = 'scan-error'
-            elif scanner_stop_reason in {'request-limit', 'runtime-limit', 'response-limit'}:
+            elif scanner_stop_reason in {'request-limit', 'runtime-limit'}:
                 api_scan_status = 'partial' if any(api_action_groups.values()) else 'failed'
                 api_error_type = next(iter(sorted(api_scanner.request_error_types)), None)
                 api_stop_reason = scanner_stop_reason
