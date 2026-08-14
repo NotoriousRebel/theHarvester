@@ -12,6 +12,7 @@ import pytest
 
 import theHarvester.__main__ as theharvester_main
 from theHarvester.discovery import rapiddns
+from theHarvester.lib import source_runner
 from theHarvester.lib.completed_result import CompletedResult
 from theHarvester.lib.core import FetcherResponse
 from theHarvester.lib.output import configure_logging
@@ -212,7 +213,7 @@ async def test_rapiddns_evidence_reaches_existing_outputs(
     monkeypatch.setattr(rapiddns.AsyncFetcher, 'fetch_all', fake_fetch_all)
     monkeypatch.setattr(theharvester_main, 'ResultStore', FakeResultStore)
     monkeypatch.setattr(theharvester_main.hostchecker, 'Checker', UnexpectedChecker)
-    monkeypatch.setattr(theharvester_main.search_dehashed, 'SearchDehashed', FakeDehashed)
+    monkeypatch.setattr(source_runner.search_dehashed, 'SearchDehashed', FakeDehashed)
     monkeypatch.setattr(theharvester_main.api_endpoints, 'SearchApiEndpoints', FakeApiEndpoints)
     monkeypatch.setattr(theharvester_main.securityscorecard, 'SearchSecurityScorecard', FakeSecurityScorecard)
     monkeypatch.setattr(theharvester_main.dnssearch, 'reverse_all_ips_in_range', fake_reverse_all_ips_in_range)

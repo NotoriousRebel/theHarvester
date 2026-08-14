@@ -1790,6 +1790,91 @@ async def test_migrated_source_dns_and_checkpoint_remain_inside_each_source_job(
     assert {execution.source for execution in response[-1].source_executions} == {'apis-guru', 'sourcegraph'}
 
 
+@pytest.mark.parametrize(
+    ('source', 'main_module_name', 'constructor_name'),
+    [
+        ('arquivo', 'arquivo', 'SearchArquivo'),
+        ('baidu', 'baidusearch', 'SearchBaidu'),
+        ('brave', 'bravesearch', 'SearchBrave'),
+        ('censys', 'censysearch', 'SearchCensys'),
+        ('commoncrawl', 'commoncrawl', 'SearchCommoncrawl'),
+        ('dehashed', 'search_dehashed', 'SearchDehashed'),
+        ('github-code', 'githubcode', 'SearchGithubCode'),
+        ('hunter', 'huntersearch', 'SearchHunter'),
+        ('mojeek', 'mojeek', 'SearchMojeek'),
+        ('netlas', 'netlas', 'SearchNetlas'),
+        ('rocketreach', 'rocketreach', 'SearchRocketReach'),
+        ('tomba', 'tombasearch', 'SearchTomba'),
+        ('waybackarchive', 'waybackarchive', 'SearchWaybackarchive'),
+        ('yahoo', 'yahoosearch', 'SearchYahoo'),
+        ('zoomeye', 'zoomeyesearch', 'SearchZoomEye'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_limited_source_orchestration_uses_immutable_runner_request(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    main_module_name: str,
+    constructor_name: str,
+) -> None:
+    requests: list[source_runner.SourceRequest] = []
+    processed_with_proxy: list[bool] = []
+
+    class FakeAdapter:
+        execution_status = 'partial'
+        stop_reason = 'provider-boundary'
+
+        async def process(self, proxy: bool) -> None:
+            processed_with_proxy.append(proxy)
+
+        async def get_hostnames(self) -> set[str]:
+            return {'sub.example.test'}
+
+        async def get_emails(self) -> set[str]:
+            return {'user@example.test'}
+
+        async def get_ips(self) -> set[str]:
+            return {'192.0.2.1'}
+
+        async def get_asns(self) -> set[str]:
+            return {'AS64500'}
+
+        async def get_urls(self) -> set[str]:
+            return {'https://sub.example.test/evidence'}
+
+    def runner_factory(request: source_runner.SourceRequest) -> FakeAdapter:
+        requests.append(request)
+        return FakeAdapter()
+
+    def legacy_constructor(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError('legacy constructor branch was used')
+
+    legacy_module = ModuleType(f'test_legacy_{main_module_name}')
+    setattr(legacy_module, constructor_name, legacy_constructor)
+    monkeypatch.setattr(theharvester_main, main_module_name, legacy_module, raising=False)
+    monkeypatch.setitem(source_runner.SOURCE_FACTORIES, source, runner_factory)
+    monkeypatch.setattr(theharvester_main, 'ResultStore', _NoopResultStore)
+
+    response = await theharvester_main.start(
+        EnumerationOptions(
+            domain='example.test',
+            source=source,
+            limit=37,
+            start=11,
+            proxies=True,
+            quiet=True,
+        ),
+        return_completed_result=True,
+    )
+
+    assert requests == [source_runner.SourceRequest(source, 'example.test', 37, 11, True, True)]
+    assert processed_with_proxy == [True]
+    execution = response[-1].source_executions[0]
+    assert execution.source == source
+    assert execution.status == 'partial'
+    assert execution.stop_reason == 'provider-boundary'
+
+
 @pytest.mark.asyncio
 async def test_invalid_source_outcome_is_not_recorded_as_completed(monkeypatch: pytest.MonkeyPatch) -> None:
     completed: list[CompletedResult] = []

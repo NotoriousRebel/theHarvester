@@ -24,14 +24,9 @@ import ujson
 
 from theHarvester.discovery import (
     api_endpoints,
-    arquivo,
-    baidusearch,
     bevigil,
-    bravesearch,
     bufferoverun,
-    censysearch,
     certspottersearch,
-    commoncrawl,
     criminalip,
     crtname,
     crtsh,
@@ -40,25 +35,19 @@ from theHarvester.discovery import (
     dymosearch,
     fofa,
     fullhuntsearch,
-    githubcode,
     gitlabsearch,
     hackertarget,
     haveibeenpwned,
     hibpverified,
-    huntersearch,
     intelxsearch,
     leakix,
     leaklookup,
-    mojeek,
-    netlas,
     onyphe,
     otxsearch,
     pentesttools,
     projectdiscovery,
     rapiddns,
     robtex,
-    rocketreach,
-    search_dehashed,
     search_dnsdumpster,
     searchhunterhow,
     securityscorecard,
@@ -71,14 +60,10 @@ from theHarvester.discovery import (
     subdomainfinderc99,
     takeover,
     thc,
-    tombasearch,
     urlscan,
     virustotal,
-    waybackarchive,
     whoisxml,
     windvane,
-    yahoosearch,
-    zoomeyesearch,
 )
 from theHarvester.discovery.constants import MissingKey
 from theHarvester.lib import hostchecker
@@ -1093,23 +1078,10 @@ async def start(
                     stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'arquivo':
-                    try:
-                        arquivo_search = arquivo.SearchArquivo(word, limit)
-                        stor_lst.append(store(arquivo_search, engineitem))
-                    except Exception as e:
-                        show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'baidu':
-                    try:
-                        baidu_search = baidusearch.SearchBaidu(word, limit)
-                        stor_lst.append(
-                            store(
-                                baidu_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'bevigil':
                     try:
@@ -1126,18 +1098,7 @@ async def start(
                         show_default_error_message(engineitem, word, error=e)
 
                 elif engineitem == 'brave':
-                    try:
-                        brave_search = bravesearch.SearchBrave(word, limit)
-                        stor_lst.append(
-                            store(
-                                brave_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                        show_default_error_message(engineitem, word, error=e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'bufferoverun':
                     try:
@@ -1157,30 +1118,7 @@ async def start(
                     stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'censys':
-                    try:
-                        censys_search = censysearch.SearchCensys(word, limit)
-                        stor_lst.append(
-                            store(
-                                censys_search,
-                                engineitem,
-                            )
-                        )
-                    except MissingKey as mk:
-                        record_missing_credentials(engineitem)
-                        if not args.quiet:
-                            output_logger.info(f'Censys Platform credentials are missing or invalid: {mk}')
-                    except ConnectionError as ce:
-                        if not args.quiet:
-                            output_logger.info(f'Network error while querying Censys: {ce}')
-                    except TimeoutError as te:
-                        if not args.quiet:
-                            output_logger.info(f'Timeout occurred while contacting Censys: {te}')
-                    except ValueError as ve:
-                        if not args.quiet:
-                            output_logger.info(f'Censys returned unexpected data: {ve}')
-                    except Exception as e:
-                        if not args.quiet:
-                            output_logger.info(f'Unexpected error occurred in Censys module: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'certspotter':
                     try:
@@ -1204,16 +1142,7 @@ async def start(
                             output_logger.info(f'Unexpected error occurred in Certspotter module: {e}')
 
                 elif engineitem == 'commoncrawl':
-                    try:
-                        commoncrawl_search = commoncrawl.SearchCommoncrawl(word, limit)
-                        stor_lst.append(
-                            store(
-                                commoncrawl_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'criminalip':
                     try:
@@ -1247,21 +1176,7 @@ async def start(
                         output_logger.info(f'[!] A timeout occurred with crtsh, cannot find {args.domain}\n {e}')
 
                 elif engineitem == 'dehashed':
-                    try:
-                        dehashed_search = search_dehashed.SearchDehashed(word, limit=limit)
-                        stor_lst.append(
-                            store(
-                                dehashed_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in dehashed: {e}')
-                        else:
-                            show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'dnsdb':
                     try:
@@ -1330,18 +1245,7 @@ async def start(
                                 output_logger.info(f'A Missing Key error occurred in fullhunt: {e}')
 
                 elif engineitem == 'github-code':
-                    try:
-                        github_search = githubcode.SearchGithubCode(word, limit)
-                        stor_lst.append(
-                            store(
-                                github_search,
-                                engineitem,
-                            )
-                        )
-                    except MissingKey as ex:
-                        record_missing_credentials(engineitem)
-                        if not args.quiet:
-                            output_logger.info(f'A Missing Key error occurred in github-code: {ex}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'gitlab':
                     try:
@@ -1389,19 +1293,7 @@ async def start(
                     stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'hunter':
-                    try:
-                        hunter_search = huntersearch.SearchHunter(word, limit, start)
-                        stor_lst.append(
-                            store(
-                                hunter_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in Hunter: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'hunterhow':
                     try:
@@ -1465,35 +1357,10 @@ async def start(
                             output_logger.info(f'An exception has occurred in LeakLookup search: {e}')
 
                 elif engineitem == 'mojeek':
-                    try:
-                        mojeek_search = mojeek.SearchMojeek(word, limit)
-                        stor_lst.append(
-                            store(
-                                mojeek_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            output_logger.info(f'A Missing Key error occurred in Mojeek: {e}')
-                        else:
-                            output_logger.info(f'An exception has occurred in Mojeek search: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'netlas':
-                    try:
-                        netlas_search = netlas.SearchNetlas(word, limit)
-                        stor_lst.append(
-                            store(
-                                netlas_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in Netlas: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'onyphe':
                     try:
@@ -1604,16 +1471,7 @@ async def start(
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'rocketreach':
-                    try:
-                        rocketreach_search = rocketreach.SearchRocketReach(word, limit)
-                        stor_lst.append(store(rocketreach_search, engineitem))
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in RocketReach: {e}')
-                        else:
-                            output_logger.info(f'An exception has occurred in RocketReach: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'securityscorecard':
                     try:
@@ -1735,19 +1593,7 @@ async def start(
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'tomba':
-                    try:
-                        tomba_search = tombasearch.SearchTomba(word, limit, start)
-                        stor_lst.append(
-                            store(
-                                tomba_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in Tomba: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'urlscan':
                     try:
@@ -1785,16 +1631,7 @@ async def start(
                                 output_logger.info(f'A Missing Key error occurred in virustotal search: {e}')
 
                 elif engineitem == 'waybackarchive':
-                    try:
-                        waybackarchive_search = waybackarchive.SearchWaybackarchive(word, limit)
-                        stor_lst.append(
-                            store(
-                                waybackarchive_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        show_default_error_message(engineitem, word, e)
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'whoisxml':
                     try:
@@ -1821,44 +1658,10 @@ async def start(
                         show_default_error_message(engineitem, word, e)
 
                 elif engineitem == 'yahoo':
-                    try:
-                        yahoo_search = yahoosearch.SearchYahoo(word, limit)
-                        stor_lst.append(
-                            store(
-                                yahoo_search,
-                                engineitem,
-                            )
-                        )
-                    except ConnectionError as ce:
-                        if not args.quiet:
-                            output_logger.info(f'Network connection error while accessing Yahoo: {ce}')
-                    except TimeoutError as te:
-                        if not args.quiet:
-                            output_logger.info(f'Request to Yahoo timed out: {te}')
-                    except ValueError as ve:
-                        if not args.quiet:
-                            output_logger.info(f'Yahoo returned invalid or unexpected data: {ve}')
-                    except KeyError as ke:
-                        if not args.quiet:
-                            output_logger.info(f'Unexpected response structure from Yahoo (missing key): {ke}')
-                    except Exception as e:
-                        if not args.quiet:
-                            output_logger.info(f'Unexpected error occurred in Yahoo module: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
                 elif engineitem == 'zoomeye':
-                    try:
-                        zoomeye_search = zoomeyesearch.SearchZoomEye(word, limit)
-                        stor_lst.append(
-                            store(
-                                zoomeye_search,
-                                engineitem,
-                            )
-                        )
-                    except Exception as e:
-                        if isinstance(e, MissingKey):
-                            record_missing_credentials(engineitem)
-                            if not args.quiet:
-                                output_logger.info(f'A Missing Key error occurred in zoomeye: {e}')
+                    stor_lst.append(SourceJob(SourceRequest(engineitem, word, limit, start, use_proxy, collect_hosts)))
 
         elif rest_args is not None:
             try:
