@@ -53,11 +53,6 @@ An enumeration policy that requires supported HTTP(S) provider and target reques
 _Avoid_: Fully proxied run, anonymous mode
 
 
-**HTTP proxy mode**:
-An enumeration policy that requires supported HTTP(S) provider and target requests to use a configured proxy while DNS queries independently use the operator-selected recursive resolver vantages.
-_Avoid_: Fully proxied run, anonymous mode
-
-
 ## Runs and schedules
 
 **Enumeration run**:
