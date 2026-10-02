@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import random
 import re
 from dataclasses import asdict, dataclass, field
@@ -16,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from theHarvester.lib.cancellation import drain_tasks_after_cancellation
-from theHarvester.lib.core import AsyncFetcher, Core, FetcherResponse, ResponseStreamError
+from theHarvester.lib.core import DATA_DIR, AsyncFetcher, Core, FetcherResponse, ResponseStreamError
 
 logger = logging.getLogger(__name__)
 _DIAGNOSTIC_RESPONSE_HEADERS = {
@@ -28,6 +27,8 @@ _DIAGNOSTIC_RESPONSE_HEADERS = {
     'retry-after',
     'www-authenticate',
 }
+# Statuses that say the probed path does not exist on the target.
+_MISSING_ENDPOINT_STATUSES = frozenset({404, 410})
 
 
 @dataclass
@@ -149,10 +150,8 @@ class SearchApiEndpoints:
         self.stop_reason: str | None = None
 
         # Set default wordlist path
-        default_wordlist = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'wordlists', 'api_endpoints.txt'
-        )
-        self.wordlist = wordlist or default_wordlist
+        default_wordlist = DATA_DIR / 'wordlists' / 'api_endpoints.txt'
+        self.wordlist = wordlist or str(default_wordlist)
         self.exact_paths = exact_paths
 
         # Add comprehensive API paths categorized by functionality
@@ -674,6 +673,10 @@ class SearchApiEndpoints:
                         break
                     result = self._process_response(url, method, response, response_time, body_truncated=body_truncated)
                     if result is None:
+                        if response.status in _MISSING_ENDPOINT_STATUSES:
+                            # Other methods cannot make a missing path exist,
+                            # and OPTIONS often succeeds for any path.
+                            return None
                         break
                     if await self._retry_limited_response(response.status, response.headers, attempt):
                         continue
@@ -826,6 +829,10 @@ class SearchApiEndpoints:
         self.methods.add(method)
         self.status_codes.add(status)
 
+        # The path does not exist; keep it counted as checked but not as found.
+        if status in _MISSING_ENDPOINT_STATUSES:
+            return None
+
         # Get response headers safely
         try:
             headers = dict(getattr(response, 'headers', {}))
@@ -892,7 +899,7 @@ class SearchApiEndpoints:
         # Check if this is an interesting endpoint
         interesting = (
             status in [200, 201, 202, 204]
-            and (content_length > 0 or method in ['GET', 'POST'])
+            and (content_length > 0 or method == 'GET')
             and ('api' in url.lower() or 'json' in content_type.lower() or 'xml' in content_type.lower())
         )
 
@@ -1087,26 +1094,3 @@ class SearchApiEndpoints:
     def get_schema_detected(self) -> dict[str, dict[str, Any]]:
         """Get detected API schemas (Swagger/OpenAPI)."""
         return self.schema_detected
-
-    def export_results(self, output_file: str | None = None, format: str = 'json') -> str | dict | None:
-        """Write scan results to a file or return them to the caller.
-
-        Args:
-            output_file: Optional destination path.
-            format: Either ``json`` or ``dict``.
-
-        Returns:
-            The requested representation, or ``None`` when saved to a file.
-
-        """
-        results = {'summary': self.get_results_summary(), 'endpoints': self.get_detailed_results()}
-
-        if output_file:
-            with open(output_file, 'w') as f:
-                json.dump(results, f, indent=2)
-            return None
-
-        if format == 'json':
-            return json.dumps(results, indent=2)
-        else:
-            return results

@@ -1,8 +1,9 @@
-import asyncio
 import logging
 
-from theHarvester.discovery.constants import MissingKey, get_delay
-from theHarvester.lib.core import AsyncFetcher, Core
+from theHarvester.discovery.constants import MissingKey
+from theHarvester.discovery.provider_response import provider_http_error
+from theHarvester.lib.core import AsyncFetcher, Core, FetcherResponse
+from theHarvester.lib.source_execution import SourceExecutionReport, SourceReportStatus
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ class SearchRocketReach:
         self.ips: set = set()
         self.word = word
         self.key = Core.rocketreach_key()
-        if self.key is None:
+        if not isinstance(self.key, str) or not self.key.strip():
             raise MissingKey('RocketReach')
         self.hosts: set = set()
         self.proxy = False
@@ -21,7 +22,10 @@ class SearchRocketReach:
         self.emails: set = set()
         self.limit = limit
 
-    async def do_search(self) -> None:
+    def _report(self, status: SourceReportStatus, reason: str) -> SourceExecutionReport:
+        return SourceExecutionReport('partial' if self.urls or self.emails else status, reason)
+
+    async def do_search(self) -> SourceExecutionReport | None:
         try:
             if self.limit is not None and self.limit <= 0:
                 return
@@ -42,40 +46,64 @@ class SearchRocketReach:
                         'start': start,
                         'page_size': page_size,
                     }
-                    result = await AsyncFetcher.post_fetch(
+                    response = await AsyncFetcher.post_fetch(
                         self.baseurl,
                         session=session,
                         headers=headers,
                         data=data,
                         json=True,
+                        include_metadata=True,
                     )
+                    if failure := provider_http_error(response):
+                        logger.info('RocketReach request failed')
+                        return self._report(*failure)
+                    assert isinstance(response, FetcherResponse)
+                    result = response.body
                     if not isinstance(result, dict):
-                        break
+                        logger.info('RocketReach returned malformed data')
+                        return self._report('failed', 'invalid-response')
 
                     detail = result.get('detail', '')
                     if detail and 'Subscribe to a plan to access' in str(detail):
-                        # No more results can be fetched
-                        break
+                        logger.info('RocketReach requires additional provider access')
+                        return self._report('failed', 'quota-exhausted')
 
                     if detail and 'Request was throttled.' in str(detail):
                         # Rate limit has been triggered need to sleep extra
-                        logger.info(
-                            f'RocketReach requests have been throttled; '
-                            f'{str(detail).split(" ", 3)[-1].replace("available", "availability")}'
-                        )
-                        break
+                        logger.info('RocketReach request was throttled')
+                        return self._report('rate-limited', 'provider-rate-limit')
 
-                    profiles = result.get('profiles', [])
+                    profiles = result.get('profiles')
+                    if not isinstance(profiles, list):
+                        logger.info('RocketReach returned malformed data')
+                        return self._report('failed', 'invalid-response')
                     if not profiles:
                         break
 
+                    malformed = False
                     for profile in profiles:
-                        if 'linkedin_url' in profile:
-                            self.urls.add(profile['linkedin_url'])
-                        if profile.get('emails'):
-                            for email in profile['emails']:
-                                if email.get('email'):
-                                    self.emails.add(email['email'])
+                        if not isinstance(profile, dict):
+                            malformed = True
+                            continue
+                        linkedin_url = profile.get('linkedin_url')
+                        if linkedin_url is not None:
+                            if isinstance(linkedin_url, str) and linkedin_url.strip():
+                                self.urls.add(linkedin_url)
+                            else:
+                                malformed = True
+                        emails = profile.get('emails', [])
+                        if not isinstance(emails, list):
+                            malformed = True
+                            continue
+                        for email in emails:
+                            if not isinstance(email, dict) or not isinstance(email.get('email'), str):
+                                malformed = True
+                                continue
+                            if email['email'].strip():
+                                self.emails.add(email['email'])
+                    if malformed:
+                        logger.info('RocketReach ignored malformed profile data')
+                        return self._report('failed', 'invalid-response')
 
                     found = len(profiles)
                     if remaining is not None:
@@ -83,16 +111,19 @@ class SearchRocketReach:
                     start += found
 
                     pagination = result.get('pagination', {})
+                    if not isinstance(pagination, dict):
+                        return self._report('failed', 'invalid-response')
                     total = pagination.get('total')
                     if isinstance(total, int) and start >= total:
                         break
                     if found < page_size:
                         break
 
-            await asyncio.sleep(get_delay() + 5)
+            return None
 
-        except Exception as e:
-            logger.info(f'An exception has occurred rocketreach: {e}')
+        except OSError, RuntimeError, ValueError:
+            logger.info('RocketReach request failed')
+            return self._report('failed', 'transport-error')
 
     async def get_urls(self):
         return self.urls
@@ -100,6 +131,6 @@ class SearchRocketReach:
     async def get_emails(self):
         return self.emails
 
-    async def process(self, proxy: bool = False) -> None:
+    async def process(self, proxy: bool = False) -> SourceExecutionReport | None:
         self.proxy = proxy
-        await self.do_search()
+        return await self.do_search()
